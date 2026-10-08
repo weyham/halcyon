@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+build/
+dist/
+
+# 本地配置与日志（可能含密钥/地址）
+.codex-responses-shim.toml
+*.local.toml
+*.log
+CHANGELOG.md.bak-*
+*.md.bak-*
+docs/release-protocol.md.bak-*
+docs/backlog.md.bak-*
+docs/*.md.bak-*
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Rust / Tauri
+target/
+target-dev*/
+target-deploy/
+
+# Node
+node_modules/
+ui/dist/
+
+
+# 内部文档仓（过程性资料，独立 git 仓，不进公开仓）
+internal-docs/
+
+# 生产运行目录（本地部署，不进库）
+prod/
+app/
+acceptance-*/
+
+

@@ -1,0 +1,21 @@
+# 统一行尾：仓库内一律以 LF 存储，检出时按平台转换
+* text=auto
+
+# 明确指定为 LF 的文件类型
+*.py text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.txt text eol=lf
+
+# Windows 批处理必须是 CRLF：cmd.exe 用 LF 会解析错行（实测会把 rem 注释当命令执行）
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# 二进制文件不做转换
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary

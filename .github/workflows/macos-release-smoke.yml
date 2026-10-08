@@ -1,0 +1,87 @@
+name: macos-release-smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published Halcyon release tag to test without modifying it
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  startup:
+    runs-on: macos-latest
+    steps:
+      - name: Download and launch published macOS asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Invalid release tag' >&2; exit 1; }
+          asset="halcyon-${RELEASE_TAG}-macos-universal.tar.gz"
+          scratch="$(mktemp -d)"
+          trap 'rm -rf "$scratch"' EXIT
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$asset" --dir "$scratch"
+          digest="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq ".assets[] | select(.name == \"$asset\") | .digest")"
+          [[ "$digest" == sha256:* ]] || { echo 'Release asset digest missing' >&2; exit 1; }
+          actual="$(shasum -a 256 "$scratch/$asset" | cut -d ' ' -f 1)"
+          [[ "sha256:$actual" == "$digest" ]] || { echo 'Release asset digest mismatch' >&2; exit 1; }
+          tar -xzf "$scratch/$asset" -C "$scratch"
+          [[ -x "$scratch/halcyon" ]] || { echo 'macOS executable missing' >&2; exit 1; }
+          python3 - "$scratch/halcyon" <<'PY'
+          import json
+          import os
+          import socket
+          import subprocess
+          import sys
+          import time
+          import urllib.error
+          import urllib.request
+
+          executable = sys.argv[1]
+          with socket.socket() as probe:
+              probe.bind(('127.0.0.1', 0))
+              port = probe.getsockname()[1]
+          with open(os.path.join(os.path.dirname(executable), 'config.json'), 'w', encoding='utf-8') as config:
+              json.dump({'listen': f'127.0.0.1:{port}', 'routes': {
+                  'smoke': {'upstream': 'http://127.0.0.1:9', 'balance': {'template': 'none'}}
+              }}, config)
+          environment = dict(os.environ)
+          environment.pop('GH_TOKEN', None)
+          environment.pop('GITHUB_TOKEN', None)
+          process = subprocess.Popen(
+              [executable], cwd=os.path.dirname(executable), env=environment,
+              stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+          )
+          deadline = time.monotonic() + 8
+          health_ok = False
+          while time.monotonic() < deadline:
+              if process.poll() is not None:
+                  break
+              try:
+                  with urllib.request.urlopen(f'http://127.0.0.1:{port}/health', timeout=0.3) as response:
+                      health = json.load(response)
+                      health_ok = response.status == 200 and health.get('routes') == ['smoke']
+              except (OSError, ValueError, urllib.error.URLError):
+                  pass
+              time.sleep(0.25)
+          if process.poll() is None:
+              process.terminate()
+              try:
+                  _, error = process.communicate(timeout=5)
+              except subprocess.TimeoutExpired:
+                  process.kill()
+                  _, error = process.communicate()
+          else:
+              _, error = process.communicate()
+          if not health_ok or time.monotonic() < deadline:
+              print(f'Process health check failed or exited early: status={process.returncode}, health={health_ok}', file=sys.stderr)
+              print(error.decode('utf-8', errors='replace')[-2000:], file=sys.stderr)
+              sys.exit(1)
+          print('Mac runner: process ran eight seconds and isolated /health returned the smoke route; GUI and Gatekeeper are not verified.')
+          PY

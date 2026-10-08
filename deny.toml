@@ -1,0 +1,46 @@
+# cargo-deny 配置：依赖许可证 / 安全公告 / 来源 三件套门禁。
+# 用法：cargo deny check（CI 的 build.yml 与本机 scripts 均可跑）
+
+[licenses]
+# 项目本体为 MIT；依赖树只允许这些 OSI 认证的宽松许可证。
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "CC0-1.0",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "MIT-0",
+    "0BSD",
+    "MPL-2.0",
+    "CDLA-Permissive-2.0",
+]
+# 置信度低于该值的多许可证组合按拒绝处理（cargo-deny 默认 0.8）
+confidence-threshold = 0.8
+
+[advisories]
+# 拉取 RustSec 安全公告库；发现已知漏洞即拒绝（有修复版本时应升级依赖）
+yanked = "deny"
+# 豁免（均为上游 velopack 传递依赖的 unmaintained 公告，非可利用漏洞；
+# 上游不升级则无法消除，升级 velopack 后应移除豁免）：
+ignore = [
+    # derivative（velopack 的 proc-macro 依赖）：无人维护，无漏洞
+    "RUSTSEC-2024-0388",
+    # proc-macro-error（velopack 的 clap 链依赖）：无人维护，无漏洞
+    "RUSTSEC-2024-0370",
+]
+
+[bans]
+# 禁止同一 crate 出现多个大版本（提示合并依赖）
+multiple-versions = "warn"
+wildcards = "warn"
+
+[sources]
+# 依赖只允许来自 crates.io 官方源（禁止未知的 git/registry 来源混入）
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

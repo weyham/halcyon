@@ -1,0 +1,3 @@
+[workspace]
+members = ["core", "src-tauri", "updater", "tools/halcyon-sign"]
+resolver = "2"

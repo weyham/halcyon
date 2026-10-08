@@ -1,0 +1,81 @@
+name: build
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  check:
+    name: windows-latest checks
+    # 公开仓一律走 GitHub 托管 runner（fork PR 不允许触达自托管机器）。
+    # Windows 用 windows-gnu 工具链，与发布构建一致（-Wl,--no-insert-timestamp 需要 GNU ld）。
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7
+        with:
+          node-version: 22
+      - name: Install Rust (windows-gnu)
+        shell: pwsh
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
+          rustup default stable-x86_64-pc-windows-gnu
+          cargo --version
+      - name: Install UI dependencies
+        run: npm ci --prefix ui
+      - name: Build UI
+        run: npm run build --prefix ui
+      - name: Core tests
+        run: cargo test -p halcyon-core
+      - name: Workspace check
+        run: cargo check --workspace
+
+  deny:
+    name: cargo-deny（依赖许可证与安全公告门禁）
+    # cargo-deny-action 是容器 action，仅支持 Linux；检查只读 Cargo.toml/lock，与平台无关
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25  # v2
+        with:
+          command: check
+
+  check-macos:
+    name: macos-latest checks
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d  # stable
+      - name: Install UI dependencies
+        run: npm ci --prefix ui
+      - name: Build UI
+        run: npm run build --prefix ui
+      - name: Core tests
+        run: cargo test -p halcyon-core
+      - name: Workspace check
+        run: cargo check --workspace
+
+  macos-bundle:
+    name: macOS .app bundle
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d  # stable
+      - name: Build and package .app
+        env:
+          HALCYON_UPDATE_PUBLIC_KEY: ${{ vars.HALCYON_UPDATE_PUBLIC_KEY }}
+        run: bash scripts/build-macos.sh "$RUNNER_TEMP/halcyon-macos"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7
+        with:
+          name: halcyon-macos-app
+          path: |
+            ${{ runner.temp }}/halcyon-macos/*.tar.gz
+            ${{ runner.temp }}/halcyon-macos/*.dmg

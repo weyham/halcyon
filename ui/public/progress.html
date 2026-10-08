@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>Halcyon 自动修复</title>
+    <style>
+      /* 任务栏上方的小卡片：只显示进度，不做交互，不抢焦点。 */
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: transparent;
+        font-family: "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
+        user-select: none;
+        cursor: default;
+      }
+      .card {
+        box-sizing: border-box;
+        width: 100%;
+        height: 100%;
+        border-radius: 12px;
+        background: #1f2023;
+        border: 1px solid #34363b;
+        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+        padding: 12px 14px;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: 8px;
+        color: #e8e8ea;
+      }
+      .row {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 10px;
+      }
+      .title {
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: 0.2px;
+      }
+      .count {
+        font-size: 12px;
+        color: #9fa3ab;
+        font-variant-numeric: tabular-nums;
+      }
+      .track {
+        height: 6px;
+        border-radius: 3px;
+        background: #35373c;
+        overflow: hidden;
+      }
+      .fill {
+        height: 100%;
+        width: 0%;
+        border-radius: 3px;
+        background: #4c9aff;
+        transition: width 220ms linear;
+      }
+      /* 不确定进度（扫描阶段还没有总数）：一条来回滑动的光带 */
+      .fill.indeterminate {
+        width: 35%;
+        animation: slide 1.15s ease-in-out infinite;
+      }
+      @keyframes slide {
+        0% {
+          transform: translateX(-110%);
+        }
+        100% {
+          transform: translateX(330%);
+        }
+      }
+      .sub {
+        font-size: 11px;
+        color: #8b8f97;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        min-height: 14px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <div class="row">
+        <span class="title" id="title">自动修复中</span>
+        <span class="count" id="count"></span>
+      </div>
+      <div class="track"><div class="fill" id="fill"></div></div>
+      <div class="sub" id="sub"></div>
+    </div>
+    <script>
+      const titleEl = document.getElementById("title");
+      const countEl = document.getElementById("count");
+      const fillEl = document.getElementById("fill");
+      const subEl = document.getElementById("sub");
+
+      // 由 Rust 侧 window.eval 调用；settled/total 为数字，sub 为可选说明文本。
+      window.__halcyon_progress = (settled, total, sub) => {
+        const scanning = !total;
+        titleEl.textContent = scanning ? "正在扫描待修复任务" : "自动修复中";
+        countEl.textContent = scanning ? "" : settled + " / " + total;
+        if (scanning) {
+          fillEl.classList.add("indeterminate");
+          fillEl.style.width = "";
+        } else {
+          fillEl.classList.remove("indeterminate");
+          fillEl.style.width = Math.max(0, Math.min(100, (settled / total) * 100)) + "%";
+        }
+        subEl.textContent = sub || "";
+      };
+
+      // 一次性结论（已排队 / 完成 / 部分完成）：标题与说明都由 Rust 侧给出，
+      // 卡片不自行推断——扫描结束 ≠ 修复完成（Codex 运行时只能排队）。
+      window.__halcyon_notice = (title, note) => {
+        titleEl.textContent = title || "自动修复";
+        countEl.textContent = "";
+        fillEl.classList.remove("indeterminate");
+        fillEl.style.width = "0%";
+        subEl.textContent = note || "";
+      };
+    </script>
+  </body>
+</html>

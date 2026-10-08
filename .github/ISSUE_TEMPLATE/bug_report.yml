@@ -1,0 +1,37 @@
+name: Bug 报告
+description: 代理改写不正确，或服务异常
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请勿粘贴 API key、token 或真实对话内容，贴脱敏后的最小报文即可。
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 现象
+      description: 发生了什么，期望是什么
+    validations:
+      required: true
+  - type: textarea
+    id: request
+    attributes:
+      label: 最小报文
+      description: 上游收到的 input 条目（脱敏）。若是 400，请附完整报错文本。
+      render: json
+    validations:
+      required: true
+  - type: input
+    id: upstream
+    attributes:
+      label: 上游
+      placeholder: 例如 https://api.deepseek.com（Responses 原生）
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      placeholder: Halcyon 版本 / Codex 版本 / 操作系统
+    validations:
+      required: true

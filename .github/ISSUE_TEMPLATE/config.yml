@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安全问题（私密报告）
+    url: https://github.com/weyham/halcyon/security/advisories/new
+    about: 涉及密钥泄露、远程代码执行等安全问题，请勿开公开 Issue，走私密通道
+  - name: 使用讨论
+    url: https://github.com/weyham/halcyon/discussions
+    about: 使用问题与经验交流（Discussions 开启前可先用 Issue）

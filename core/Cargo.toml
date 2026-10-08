@@ -1,0 +1,55 @@
+[package]
+license = "MIT"
+publish = false
+name = "halcyon-core"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.82"
+description = "Halcyon 的纯逻辑核心：Responses 请求改写引擎、配置与转发服务（无 Tauri 依赖）"
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+sha1 = "0.11"
+sysinfo = "0.39"
+regex = "1.11"
+reqwest = { version = "0.13", features = ["json", "stream", "form"] }
+log = "0.4"
+rusqlite = { version = "0.40", features = ["bundled"] }
+ureq = "3"
+jiff = "0.2"
+async-trait = "0.1"
+bytes = "1"
+futures-util = "0.3"
+hex = "0.4"
+minisign-verify = "0.3"
+semver = "1"
+sha2 = "0.11"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+velopack = "1"
+zip = { version = "8", default-features = false, features = ["deflate"] }
+
+[features]
+dev-updater = []
+
+[dev-dependencies]
+minisign = "0.10"
+rusqlite = { version = "0.40", features = ["bundled"] }
+tempfile = "3"
+wiremock = "0.6"
+fern = "0.7.1"
+
+
+
+
+
+
+
+
+
+
+
+

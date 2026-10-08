@@ -1,0 +1,3 @@
+# Python 字节码缓存（importlib 加载 brand-art.py 时可能产生）
+__pycache__/
+*.pyc

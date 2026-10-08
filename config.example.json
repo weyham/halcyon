@@ -1,0 +1,41 @@
+{
+  "listen": "127.0.0.1:8788",
+  "log_level": "info",
+  "routes": {
+    "ds":    { "upstream": "https://api.deepseek.com" },
+    "kimi":  { "upstream": "https://api.kimi.com/coding/v1", "aliases": ["/kimi/v1"] },
+    "zhipu": { "upstream": "https://open.bigmodel.cn/api/v1", "aliases": ["/zhipu/v1"] },
+    "newapi": {
+      "_comment": "示例：全新形状的供应商用 custom 声明式规则接入（等价于内置 Kimi 模板）。照抄后改 upstream 与 balance.url 即可；规则语法见 docs/design.md §9；设置页「用量查询」按钮可可视化编辑并即时测试。不需要时整段删除。",
+      "upstream": "https://your-provider.example.com/v1",
+      "balance": {
+        "template": "custom",
+        "url": "https://your-provider.example.com/v1/usages",
+        "custom": {
+          "sources": [
+            {
+              "rows_path": "usages",
+              "rows_as": "map",
+              "row": {
+                "label": "@key",
+                "pct": "used_ratio",
+                "reset": "reset_time",
+                "detail": "{/limits[0].detail.used}/{/limits[0].detail.limit}"
+              },
+              "row_overrides": { "limit_7d": { "detail": "{/usage.used}/{/usage.limit}" } }
+            }
+          ],
+          "scale": 100,
+          "label_map": { "limit_5h": "5h", "limit_7d": "周", "limit_30d": "月", "limit_month": "月", "limit_1m": "月" },
+          "label_strip_prefix": "limit_",
+          "sort": [ { "suffix": "h" }, { "contains": "周" }, { "contains": "月" } ]
+        }
+      }
+    }
+  },
+  "orphan_header": true,
+  "update": {
+    "_comment": "include_prerelease=true 时，安装版更新通道会把预发布（Pre-release）也算作可用更新；缺省 false。仅用于联调「已装版本 → 预发布版本」的更新链路，平时不要开。",
+    "include_prerelease": false
+  }
+}

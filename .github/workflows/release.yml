@@ -1,0 +1,304 @@
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing v* tag to package (manual approval gate)'
+        required: true
+        type: string
+      platforms:
+        description: 'Release platforms: "windows,macos" (default, full) or "windows" (Windows-only, 仅特殊联调)'
+        required: false
+        default: 'windows,macos'
+        type: string
+      windows_artifact_run_id:
+        description: 'Optional run ID containing halcyon-windows-packages; skips Windows build'
+        required: false
+        type: string
+      macos_artifact_run_id:
+        description: 'Optional run ID containing halcyon-macos-package; skips macOS build'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: halcyon-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  HALCYON_UPDATE_PUBLIC_KEY: ${{ vars.HALCYON_UPDATE_PUBLIC_KEY }}
+  RELEASE_TAG: ${{ inputs.tag }}
+
+jobs:
+  windows:
+    # Windows 发布构建：GitHub 托管 runner（公开仓标准 runner）
+    if: inputs.windows_artifact_run_id == ''
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7
+        with:
+          node-version: 22
+      # 发布构建必须 windows-gnu：-Wl,--no-insert-timestamp 是 GNU ld 参数
+      #（两个通道的 halcyon.exe 逐字节相同依赖它）。
+      - name: Install Rust (windows-gnu)
+        shell: pwsh
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
+          rustup default stable-x86_64-pc-windows-gnu
+          cargo --version
+      - name: Build packages
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:HALCYON_UPDATE_PUBLIC_KEY)) { throw 'Missing HALCYON_UPDATE_PUBLIC_KEY repository variable' }
+          # K1/H2：三个通道共用同一次构建（含 no-insert-timestamp，保证 nupkg 与
+          # update.zip 里的 halcyon.exe 逐字节相同）。
+          $env:CARGO_TARGET_DIR = 'target/release-package'
+          $env:RUSTFLAGS = '-C link-arg=-Wl,--no-insert-timestamp'
+          npm ci --prefix ui
+          npm run build --prefix ui
+          cargo test -p halcyon-core
+          cargo build --release -p halcyon-app -p halcyon-updater --features custom-protocol
+          $version = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          if ($env:RELEASE_TAG -notmatch '^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$' -or $env:RELEASE_TAG -ne "v$version") { throw 'Tag and source version mismatch' }
+          $build = 'target/release-package/release'
+          $dll = Get-ChildItem $build -Recurse -Filter WebView2Loader.dll | Select-Object -First 1
+          if (-not $dll) { throw 'WebView2Loader.dll not found' }
+          $root = "$env:RUNNER_TEMP\halcyon-assets"
+          $portable = "$root\halcyon-v$version-windows-x64-portable"
+          $update = "$root\halcyon-v$version-windows-x64-update"
+          New-Item -ItemType Directory -Force $portable,$update | Out-Null
+          cargo build --release -p halcyon-sign
+          if ($LASTEXITCODE -ne 0) { throw 'Signing tool build failed' }
+          Copy-Item "$build/halcyon-sign.exe" "$root/halcyon-sign.exe"
+          Copy-Item "$build/halcyon.exe" "$portable/halcyon.exe"
+          Copy-Item $dll.FullName "$portable/WebView2Loader.dll"
+          Copy-Item LICENSE "$portable/LICENSE.txt"
+          Set-Content "$portable/VERSION.txt" $version -Encoding ascii
+          Set-Content "$portable/README-portable.txt" "Halcyon $version Windows x64 portable. Extract to a writable directory and run halcyon.exe. Keep config.json when updating." -Encoding utf8
+          Copy-Item "$build/halcyon.exe" "$update/halcyon.exe"
+          Copy-Item "$build/halcyon-updater.exe" "$update/halcyon-updater.exe"
+          Copy-Item $dll.FullName "$update/WebView2Loader.dll"
+          Set-Content "$update/VERSION.txt" $version -Encoding ascii
+          Compress-Archive "$portable/*" "$root/halcyon-v$version-windows-x64-portable.zip"
+          Compress-Archive "$update/*" "$root/halcyon-v$version-windows-x64-update.zip"
+          # 安装通道（Velopack）五件资产，复用上面同一次构建；不覆盖 vpk portable。
+          $vpkOut = "$root/velopack"
+          pwsh -NoProfile -File scripts/build-velopack.ps1 -FromBuild (Resolve-Path $build).Path -SkipPortableOverride -OutputDirectory $vpkOut
+          if ($LASTEXITCODE -ne 0) { throw 'Velopack packaging failed' }
+          $setup = Get-Item "$vpkOut/Halcyon-win-Setup.exe"
+          if ($setup.VersionInfo.FileVersion -ne $version -or $setup.VersionInfo.ProductVersion -ne $version) {
+            throw "Setup.exe version mismatch: $($setup.VersionInfo.FileVersion)/$($setup.VersionInfo.ProductVersion)"
+          }
+          foreach ($name in @("Halcyon-$version-full.nupkg", 'RELEASES', 'releases.win.json', 'assets.win.json')) {
+            if (-not (Test-Path -LiteralPath "$vpkOut/$name")) { throw "Velopack asset missing: $name" }
+          }
+          # 安装通道自洽校验（nupkg 的 Size/SHA256/SHA1、RELEASES、assets.win.json、
+          # Setup 版本号、nupkg 内 halcyon.exe 与 update 包同哈希）。刻意放在构建 job、
+          # 早于任何 Draft：不合格的产物连 artifact 都不上传，也不会有"半填的 Draft"。
+          pwsh -NoProfile -File scripts/check-velopack-assets.ps1 -VelopackDirectory $vpkOut -UpdateZip "$root/halcyon-v$version-windows-x64-update.zip" -Version $version
+          if ($LASTEXITCODE -ne 0) { throw 'Velopack asset verification failed' }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7
+        with:
+          name: halcyon-windows-packages
+          path: |
+            ${{ runner.temp }}/halcyon-assets/*.zip
+            ${{ runner.temp }}/halcyon-assets/halcyon-sign.exe
+            ${{ runner.temp }}/halcyon-assets/velopack/*
+
+  macos:
+    if: contains(inputs.platforms, 'macos') && inputs.macos_artifact_run_id == ''
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d  # stable
+      - name: Build macOS .app package
+        run: |
+          set -euo pipefail
+          version=$(python3 -c 'import json; print(json.load(open("src-tauri/tauri.conf.json"))["version"])')
+          if [ "$RELEASE_TAG" != "v${version}" ]; then echo 'Tag and source version mismatch' >&2; exit 1; fi
+          bash scripts/build-macos.sh "$RUNNER_TEMP/halcyon-macos"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7
+        with:
+          name: halcyon-macos-package
+          path: |
+            ${{ runner.temp }}/halcyon-macos/*.tar.gz
+            ${{ runner.temp }}/halcyon-macos/*.dmg
+
+  publish-draft:
+    needs: [windows, macos]
+    if: >-
+      always() && !cancelled() &&
+      (needs.windows.result == 'success' || inputs.windows_artifact_run_id != '') &&
+      (!contains(inputs.platforms, 'macos') || needs.macos.result == 'success' || inputs.macos_artifact_run_id != '')
+    # 签名发布：GitHub 托管 runner（Environment 的签名材料与 runner 无关）
+    runs-on: windows-latest
+    environment:
+      name: release
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
+        if: inputs.windows_artifact_run_id == ''
+        with:
+          name: halcyon-windows-packages
+          path: release-assets
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
+        if: inputs.windows_artifact_run_id != ''
+        with:
+          name: halcyon-windows-packages
+          path: release-assets
+          run-id: ${{ inputs.windows_artifact_run_id }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
+        if: contains(inputs.platforms, 'macos') && inputs.macos_artifact_run_id == ''
+        with:
+          name: halcyon-macos-package
+          path: release-assets
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
+        if: contains(inputs.platforms, 'macos') && inputs.macos_artifact_run_id != ''
+        with:
+          name: halcyon-macos-package
+          path: release-assets
+          run-id: ${{ inputs.macos_artifact_run_id }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+      - name: Sign and publish Draft
+        shell: pwsh
+        env:
+          HALCYON_MINISIGN_PRIVATE_KEY_B64: ${{ secrets.HALCYON_MINISIGN_PRIVATE_KEY_B64 }}
+          GH_TOKEN: ${{ github.token }}
+          WITH_MACOS: ${{ contains(inputs.platforms, 'macos') }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:HALCYON_MINISIGN_PRIVATE_KEY_B64)) { throw 'Missing release secret HALCYON_MINISIGN_PRIVATE_KEY_B64' }
+          # 平台开关（J1）：默认 Windows-only —— 不下载/不签名 macOS 资产，latest.json 里不出现 darwin-*
+          $withMac = $env:WITH_MACOS -eq 'true'
+          $version = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          if ($env:RELEASE_TAG -notmatch '^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$' -or $env:RELEASE_TAG -ne "v$version") { throw 'Tag and source version mismatch' }
+          $key = Join-Path $env:RUNNER_TEMP 'halcyon-release.key'
+          [IO.File]::WriteAllBytes($key, [Convert]::FromBase64String($env:HALCYON_MINISIGN_PRIVATE_KEY_B64))
+          $update = Get-ChildItem release-assets -Filter '*-windows-x64-update.zip' | Select-Object -First 1
+          if (-not $update) { throw 'Update package missing' }
+          $portable = Get-ChildItem release-assets -Filter '*-windows-x64-portable.zip' | Select-Object -First 1
+          if (-not $portable) { throw 'Windows portable package missing' }
+          # 安装通道（Velopack）五件必须随正式 Release 一起发，缺一即 fail closed。
+          $vpkDir = Join-Path 'release-assets' 'velopack'
+          $vpkNames = @('Halcyon-win-Setup.exe', "Halcyon-$version-full.nupkg", 'RELEASES', 'releases.win.json', 'assets.win.json')
+          $vpkAssets = @()
+          foreach ($name in $vpkNames) {
+            $path = Join-Path $vpkDir $name
+            if (-not (Test-Path -LiteralPath $path)) { throw "Velopack asset missing: $name" }
+            $vpkAssets += (Resolve-Path -LiteralPath $path).Path
+          }
+          $setupInfo = (Get-Item $vpkAssets[0]).VersionInfo
+          if ($setupInfo.FileVersion -ne $version -or $setupInfo.ProductVersion -ne $version) {
+            throw "Setup.exe version mismatch: $($setupInfo.FileVersion)/$($setupInfo.ProductVersion)"
+          }
+          $mac = $null
+          $dmg = $null
+          if ($withMac) {
+            $mac = Get-ChildItem release-assets -Filter '*-macos-universal.tar.gz' | Select-Object -First 1
+            if (-not $mac) { throw 'macOS package missing' }
+            $dmg = Get-ChildItem release-assets -Filter '*-macos-universal.dmg' | Select-Object -First 1
+            if (-not $dmg) { throw 'macOS dmg missing' }
+          }
+          $signer = (Resolve-Path (Join-Path 'release-assets' 'halcyon-sign.exe')).Path
+          $publicKey = Join-Path $env:RUNNER_TEMP 'halcyon-release.pub'
+          [IO.File]::WriteAllText($publicKey, $env:HALCYON_UPDATE_PUBLIC_KEY, [Text.UTF8Encoding]::new($false))
+          $artifactSig = "$($update.FullName).minisig"
+          & $signer sign --secret-key $key --input $update.FullName --output $artifactSig --trusted-comment "Halcyon $version update artifact"
+          if ($LASTEXITCODE -ne 0) { throw 'Windows artifact signing failed' }
+          & $signer verify --public-key $publicKey --input $update.FullName --signature $artifactSig
+          if ($LASTEXITCODE -ne 0) { throw 'Windows artifact signature verification failed' }
+          $macSig = $null
+          $dmgSig = $null
+          if ($withMac) {
+            $macSig = "$($mac.FullName).minisig"
+            & $signer sign --secret-key $key --input $mac.FullName --output $macSig --trusted-comment "Halcyon $version macOS artifact"
+            if ($LASTEXITCODE -ne 0) { throw 'macOS artifact signing failed' }
+            & $signer verify --public-key $publicKey --input $mac.FullName --signature $macSig
+            if ($LASTEXITCODE -ne 0) { throw 'macOS artifact signature verification failed' }
+            $dmgSig = "$($dmg.FullName).minisig"
+            & $signer sign --secret-key $key --input $dmg.FullName --output $dmgSig --trusted-comment "Halcyon $version macOS dmg"
+            if ($LASTEXITCODE -ne 0) { throw 'macOS dmg signing failed' }
+            & $signer verify --public-key $publicKey --input $dmg.FullName --signature $dmgSig
+            if ($LASTEXITCODE -ne 0) { throw 'macOS dmg signature verification failed' }
+          }
+          $releaseTag = "v$version"
+          $notes = if ($withMac) { "Windows x64 (portable + installer) and macOS universal (tar.gz + dmg). macOS build is unsigned/unnotarized: on first launch use right-click -> Open, or run 'xattr -dr com.apple.quarantine Halcyon.app'. Automated Draft Release $version" } else { "Windows x64 only. Automated Draft Release $version" }
+          $existingDraft = gh release view $releaseTag --repo "${{ github.repository }}" --json isDraft --jq .isDraft 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $releaseTag --repo "${{ github.repository }}" --draft --prerelease --title "Halcyon $version" --notes $notes --verify-tag
+            if ($LASTEXITCODE -ne 0) { throw "Creating Draft Release failed: $releaseTag" }
+          } elseif ($existingDraft -ne 'true') {
+            throw "Refusing to overwrite a published Release: $releaseTag"
+          }
+          # 注意：/releases/tags/{tag} 对 Draft 恒 404，必须用列表端点过滤；
+          # 且刚创建的 Draft 在列表端点有数秒读延迟，必须轮询等待其出现。
+          $before = $null
+          foreach ($attempt in 1..6) {
+            $allReleases = (gh api "repos/${{ github.repository }}/releases?per_page=100" | ConvertFrom-Json)
+            if ($LASTEXITCODE -ne 0) { throw 'Could not inspect Draft before upload' }
+            $before = $allReleases | Where-Object tag_name -eq $releaseTag | Select-Object -First 1
+            if ($before) { break }
+            Start-Sleep -Seconds 3
+          }
+          if (-not $before) { throw "Draft $releaseTag not visible in release list after polling" }
+          if (-not $before.draft -or $before.assets.Count -ne 0) { throw "Draft must be empty; refusing to overwrite existing assets (draft=$($before.draft), assets=$($before.assets.Count))" }
+          $uploadArgs = @($portable.FullName, $update.FullName, $artifactSig) + $vpkAssets
+          if ($withMac) { $uploadArgs += @($mac.FullName, $macSig, $dmg.FullName, $dmgSig) }
+          gh release upload $releaseTag @uploadArgs --repo "${{ github.repository }}"
+          if ($LASTEXITCODE -ne 0) { throw 'Uploading Draft assets failed' }
+          $allReleases = (gh api "repos/${{ github.repository }}/releases?per_page=100" | ConvertFrom-Json)
+          if ($LASTEXITCODE -ne 0) { throw 'Could not read Draft Release' }
+          $releaseObject = $allReleases | Where-Object tag_name -eq $releaseTag | Select-Object -First 1
+          if (-not $releaseObject -or -not $releaseObject.draft) { throw "Draft Release not found for $releaseTag" }
+          $assetId = ($releaseObject.assets | Where-Object name -eq $update.Name).id
+          if (-not $assetId) { throw 'Uploaded Windows update asset not found in Draft' }
+          $helper = Join-Path $env:RUNNER_TEMP 'halcyon-helper'
+          Expand-Archive $update.FullName $helper -Force
+          $manifestPlatforms = [ordered]@{}
+          $manifestPlatforms['windows-x86_64'] = [ordered]@{ assetId=[int64]$assetId; signature=[IO.File]::ReadAllText($artifactSig); sha256=(Get-FileHash $update.FullName -Algorithm SHA256).Hash.ToLowerInvariant(); size=$update.Length; helper=[ordered]@{ path='halcyon-updater.exe'; sha256=(Get-FileHash (Join-Path $helper 'halcyon-updater.exe') -Algorithm SHA256).Hash.ToLowerInvariant(); size=(Get-Item (Join-Path $helper 'halcyon-updater.exe')).Length }; manualOnly=$false; allowDowngrade=$false }
+          if ($withMac) {
+            $macAssetId = ($releaseObject.assets | Where-Object name -eq $mac.Name).id
+            if (-not $macAssetId) { throw 'Uploaded macOS asset not found in Draft' }
+            $macEntry = [ordered]@{ assetId=[int64]$macAssetId; signature=[IO.File]::ReadAllText($macSig); sha256=(Get-FileHash $mac.FullName -Algorithm SHA256).Hash.ToLowerInvariant(); size=$mac.Length; manualOnly=$true; allowDowngrade=$false }
+            $manifestPlatforms['darwin-aarch64'] = $macEntry
+            $manifestPlatforms['darwin-x86_64'] = $macEntry
+          }
+          $manifest = [ordered]@{ schema=1; protocol=1; version=$version; notes=""; platforms=$manifestPlatforms }
+          $manifestPath = Join-Path $env:RUNNER_TEMP 'latest.json'
+          [IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
+          & $signer sign --secret-key $key --input $manifestPath --output "$manifestPath.minisig" --trusted-comment "Halcyon $version update manifest"
+          if ($LASTEXITCODE -ne 0) { throw 'Manifest signing failed' }
+          & $signer verify --public-key $publicKey --input $manifestPath --signature "$manifestPath.minisig"
+          if ($LASTEXITCODE -ne 0) { throw 'Manifest signature verification failed' }
+          $checksumInputs = @($portable.FullName, $update.FullName)
+          if ($withMac) { $checksumInputs += @($mac.FullName, $dmg.FullName) }
+          $checksumInputs += $manifestPath
+          $checksums = $checksumInputs | ForEach-Object {
+            "$( (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash.ToLowerInvariant() )  $([IO.Path]::GetFileName($_))"
+          }
+          $checksumFile = Join-Path $env:RUNNER_TEMP 'SHA256SUMS.txt'
+          [IO.File]::WriteAllLines($checksumFile, $checksums, [Text.UTF8Encoding]::new($false))
+          gh release upload $releaseTag $manifestPath "$manifestPath.minisig" $checksumFile --repo "${{ github.repository }}"
+          if ($LASTEXITCODE -ne 0) { throw 'Uploading signed manifest failed' }
+          Remove-Item $key -Force

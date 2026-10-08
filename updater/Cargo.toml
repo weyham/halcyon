@@ -1,0 +1,15 @@
+[package]
+license = "MIT"
+publish = false
+name = "halcyon-updater"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.82"
+
+[dependencies]
+halcyon-core = { path = "../core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+fs2 = "0.4"
+uuid = { version = "1", features = ["v4"] }
+sysinfo = "0.39"

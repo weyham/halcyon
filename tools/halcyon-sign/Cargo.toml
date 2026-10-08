@@ -1,0 +1,10 @@
+[package]
+license = "MIT"
+publish = false
+name = "halcyon-sign"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+minisign = "0.10"
+halcyon-core = { path = "../../core" }
