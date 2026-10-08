@@ -11,6 +11,11 @@ use halcyon_core::config::{Config, ResolvedConfig, RouteEntry};
 use halcyon_core::logging::LogHealth;
 use halcyon_core::server;
 
+/// 真 TCP 集成测试串行执行：并行跑多个 proxy+upstream 实例会在 macOS CI 上
+/// 偶发新连接被内核立即关闭（端口快速回收 + TIME_WAIT 元组冲突），表现为
+/// 客户端首读 EOF/RST（两次 CI 实证）。串行消除资源竞争变量，不影响被测逻辑。
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[derive(Debug, Clone)]
 struct Captured {
     path: String,
@@ -132,7 +137,13 @@ fn raw_request(addr: SocketAddr, req: &[u8]) -> (u16, String, Vec<u8>) {
     stream.write_all(req).unwrap();
     let mut reader = BufReader::new(stream.try_clone().unwrap());
     let mut status_line = String::new();
-    reader.read_line(&mut status_line).unwrap();
+    reader
+        .read_line(&mut status_line)
+        .unwrap_or_else(|e| panic!("读取状态行失败 addr={addr}: {e}"));
+    assert!(
+        !status_line.is_empty(),
+        "代理未返回状态行（连接被提前关闭）addr={addr}"
+    );
     let status: u16 = status_line
         .split_whitespace()
         .nth(1)
@@ -186,6 +197,7 @@ fn raw_request(addr: SocketAddr, req: &[u8]) -> (u16, String, Vec<u8>) {
 
 #[test]
 fn passthrough_byte_exact_when_nothing_to_rewrite() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let (up, rx) = start_echo_upstream();
     let shim = server::start(shim_config(up, false)).unwrap();
     let body = br#"{"model":"m","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}"#;
@@ -209,6 +221,7 @@ fn passthrough_byte_exact_when_nothing_to_rewrite() {
 
 #[test]
 fn orphan_output_is_rewritten_before_forwarding() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let (up, rx) = start_echo_upstream();
     let shim = server::start(shim_config(up, false)).unwrap();
     let body = br#"{"input":[{"type":"function_call_output","name":"send_message_to_thread","namespace":"codex_app","output":"hello"}]}"#;
@@ -236,6 +249,7 @@ fn orphan_output_is_rewritten_before_forwarding() {
 
 #[test]
 fn interleaved_tool_round_is_reordered_before_forwarding() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let (up, rx) = start_echo_upstream();
     let shim = server::start(shim_config(up, false)).unwrap();
     let body = br#"{"input":[{"type":"function_call","call_id":"sg_call_1","name":"exec_command","arguments":"{}"},{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"thinking"}]},{"type":"function_call_output","call_id":"sg_call_1","output":"ok"}]}"#;
@@ -258,6 +272,7 @@ fn interleaved_tool_round_is_reordered_before_forwarding() {
 
 #[test]
 fn empty_text_message_is_dropped_before_forwarding() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let (up, rx) = start_echo_upstream();
     let shim = server::start(shim_config(up, false)).unwrap();
     let body = br#"{"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":""}]}]}"#;
@@ -279,6 +294,7 @@ fn empty_text_message_is_dropped_before_forwarding() {
 
 #[test]
 fn sse_streams_chunk_by_chunk() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let (up, _rx) = start_echo_upstream();
     let shim = server::start(shim_config(up, false)).unwrap();
     let mut stream = TcpStream::connect(shim.addr()).unwrap();
@@ -340,6 +356,7 @@ fn sse_streams_chunk_by_chunk() {
 
 #[test]
 fn upstream_4xx_is_returned_with_body_intact() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let (up, _rx) = start_echo_upstream();
     let shim = server::start(shim_config(up, false)).unwrap();
     let req =
@@ -352,6 +369,7 @@ fn upstream_4xx_is_returned_with_body_intact() {
 
 #[test]
 fn health_and_unknown_route() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let (up, _rx) = start_echo_upstream();
     let shim = server::start(shim_config(up, true)).unwrap();
 
@@ -375,6 +393,7 @@ fn health_and_unknown_route() {
 
 #[test]
 fn health_exposes_file_log_health() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let (up, _rx) = start_echo_upstream();
     let log_health = Arc::new(LogHealth::new());
     let shim = server::start_with_log_health(shim_config(up, true), Some(log_health)).unwrap();
@@ -393,6 +412,7 @@ fn health_exposes_file_log_health() {
 
 #[test]
 fn route_activity_is_recorded_per_route() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let (up, _rx) = start_echo_upstream();
     let shim = server::start(shim_config(up, true)).unwrap();
 
