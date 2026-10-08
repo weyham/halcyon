@@ -156,6 +156,8 @@ try {
         $platforms['darwin-aarch64'] = $macEntry
         $platforms['darwin-x86_64'] = $macEntry
     }
+    # B5：helper 展开目录只用于取哈希/大小，用完即清（失败由 throw 提前退出，保留现场）
+    Remove-Item -LiteralPath $helper -Recurse -Force
     $manifest = [ordered]@{ schema=1; protocol=1; version=$version; notes=""; platforms=$platforms }
     $manifestPath = Join-Path $OutputDirectory 'latest.json'
     [IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))

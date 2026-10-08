@@ -35,7 +35,7 @@ try {
     }
 
     # 一次构建、多通道打包（H2）：统一构建到 target\release-package，并带
-    # --no-insert-timestamp（可复现）。这一份产物同时交给 vpk pack 和
+    # /Brepro（可复现）。这一份产物同时交给 vpk pack 和
     # build-portable.ps1，两个制品里的 halcyon.exe 因此逐字节相同。
     $target = Join-Path $root "target\release-package"
     $build = Join-Path $target "release"
@@ -45,7 +45,7 @@ try {
         Write-Host "Reusing existing build output: $build"
     } elseif (-not $SkipBuild) {
         $env:CARGO_TARGET_DIR = $target
-        $env:RUSTFLAGS = "-C link-arg=-Wl,--no-insert-timestamp"
+        $env:RUSTFLAGS = "-C link-arg=/Brepro"
         Write-Host "Building UI..."
         npm --prefix ui run build
         if ($LASTEXITCODE -ne 0) { throw "UI build failed" }
@@ -61,15 +61,12 @@ try {
     New-Item -ItemType Directory -Force $stage | Out-Null
 
     $exe = Join-Path $build "halcyon.exe"
-    $dll = Get-ChildItem $build -Recurse -Filter WebView2Loader.dll | Select-Object -First 1
     $icon = Join-Path $root "src-tauri\icons\icon.ico"
 
     if (-not (Test-Path $exe)) { throw "halcyon.exe not found at $exe" }
-    if (-not $dll) { throw "WebView2Loader.dll not found" }
     if (-not (Test-Path $icon)) { throw "icon.ico not found" }
 
     Copy-Item $exe -Destination (Join-Path $stage "halcyon.exe")
-    Copy-Item $dll.FullName -Destination (Join-Path $stage "WebView2Loader.dll")
     Copy-Item (Join-Path $root "LICENSE") -Destination (Join-Path $stage "LICENSE.txt")
     Write-Utf8File (Join-Path $stage "VERSION.txt") "$version`r`n"
     Write-Utf8File (Join-Path $stage "README.txt") "Halcyon $version - Codex Responses Proxy`r`n`r`nRun Halcyon.exe to start. Configuration is stored in the data directory.`r`n"
@@ -155,6 +152,9 @@ try {
 
         $afterSize = (Get-Item -LiteralPath $vpkPortable).Length
     }
+
+    # B5：成功即清理 TEMP 暂存目录（此前 throw 提前退出则保留现场）
+    Remove-Item -Recurse -Force $stage
 
     # List output files
     $files = Get-ChildItem $OutputDirectory -File | Sort-Object Name

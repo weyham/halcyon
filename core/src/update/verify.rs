@@ -271,7 +271,7 @@ mod tests {
             writer.write_all(b"bad").unwrap();
             writer.finish().unwrap();
         }
-        let root = std::env::temp_dir().join(format!("halcyon-zip-{}", uuid::Uuid::new_v4()));
+        let root = crate::test_util::TempWorkDir::new("zip");
         let allowed = default_install_allowlist(None);
         assert!(extract_zip_safe(&zip, &root, &allowed).is_err());
 
@@ -294,7 +294,7 @@ mod tests {
 
     #[test]
     fn extracts_allowed_file_and_rejects_empty_archive() {
-        let root = std::env::temp_dir().join(format!("halcyon-zip-ok-{}", uuid::Uuid::new_v4()));
+        let root = crate::test_util::TempWorkDir::new("zip-ok");
         let mut zip = Vec::new();
         {
             let mut writer = zip::ZipWriter::new(Cursor::new(&mut zip));
@@ -313,8 +313,7 @@ mod tests {
     }
     #[test]
     fn zip_resource_limits_are_enforced() {
-        let root =
-            std::env::temp_dir().join(format!("halcyon-zip-limits-{}", uuid::Uuid::new_v4()));
+        let root = crate::test_util::TempWorkDir::new("zip-limits");
         let allowed = default_install_allowlist(None);
         let mut zip = Vec::new();
         {

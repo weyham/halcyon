@@ -424,7 +424,7 @@ mod tests {
 
     #[test]
     fn replaces_only_allowlisted_files_and_keeps_data() {
-        let root = std::env::temp_dir().join(format!("halcyon-install-{}", uuid::Uuid::new_v4()));
+        let root = crate::test_util::TempWorkDir::new("install");
         let app = root.join("app");
         let staging = app.join("updates/staging/1.0.1");
         let rollback = app.join("updates/rollback/1.0.0");
@@ -456,17 +456,17 @@ mod tests {
     }
     #[test]
     fn readiness_gate_requires_init_and_optional_webdav() {
-        let root = std::env::temp_dir().join(format!("halcyon-readiness-{}", uuid::Uuid::new_v4()));
+        let root = crate::test_util::TempWorkDir::new("readiness");
         assert!(write_readiness_after_startup(&root, "token", "1.0.1", true, false, false).is_ok());
         assert!(readiness_path(&root, "token").is_file());
 
-        let root = std::env::temp_dir().join(format!("halcyon-readiness-{}", uuid::Uuid::new_v4()));
+        let root = crate::test_util::TempWorkDir::new("readiness");
         assert!(
             write_readiness_after_startup(&root, "token", "1.0.1", false, false, false).is_err()
         );
         assert!(!readiness_path(&root, "token").exists());
 
-        let root = std::env::temp_dir().join(format!("halcyon-readiness-{}", uuid::Uuid::new_v4()));
+        let root = crate::test_util::TempWorkDir::new("readiness");
         assert!(write_readiness_after_startup(&root, "token", "1.0.1", true, true, false).is_err());
         assert!(!readiness_path(&root, "token").exists());
     }

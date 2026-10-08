@@ -169,7 +169,7 @@ mod tests {
 
     #[test]
     fn journal_round_trip_and_recovery_mapping() {
-        let root = std::env::temp_dir().join(format!("halcyon-journal-{}", uuid::Uuid::new_v4()));
+        let root = crate::test_util::TempWorkDir::new("journal");
         let path = root.join("update-journal.json");
         let mut journal = UpdateJournal::new(
             "1.0.0",
