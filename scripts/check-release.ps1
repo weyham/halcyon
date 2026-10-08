@@ -98,8 +98,10 @@ foreach ($platform in $platforms) {
     $entry = $manifest.platforms.($platform[0]); $file = Get-Item -LiteralPath (Join-Path $assets $platform[1])
     $sig = [IO.File]::ReadAllText("$($file.FullName).minisig")
     $digest = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($entry.assetId -le 0 -or $entry.size -ne $file.Length -or $entry.sha256 -ne $digest -or
-        $entry.signature -cne $sig -or $entry.manualOnly -ne $platform[2] -or $entry.allowDowngrade) {
+    $expectedUrl = "https://github.com/weyham/halcyon/releases/download/v$version/$($platform[1])"
+    if ($entry.assetId -le 0 -or $entry.url -cne $expectedUrl -or $entry.size -ne $file.Length -or
+        $entry.sha256 -ne $digest -or $entry.signature -cne $sig -or
+        $entry.manualOnly -ne $platform[2] -or $entry.allowDowngrade) {
         throw "Manifest artifact mismatch: $($platform[0])"
     }
 }

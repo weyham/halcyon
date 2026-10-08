@@ -275,12 +275,14 @@ jobs:
           if (-not $assetId) { throw 'Uploaded Windows update asset not found in Draft' }
           $helper = Join-Path $env:RUNNER_TEMP 'halcyon-helper'
           Expand-Archive $update.FullName $helper -Force
+          # url 是零 API 更新源（releases/download CDN 路由）的制品地址；assetId 保留给 1.0.0 客户端
+          $downloadBase = "https://github.com/${{ github.repository }}/releases/download/$releaseTag"
           $manifestPlatforms = [ordered]@{}
-          $manifestPlatforms['windows-x86_64'] = [ordered]@{ assetId=[int64]$assetId; signature=[IO.File]::ReadAllText($artifactSig); sha256=(Get-FileHash $update.FullName -Algorithm SHA256).Hash.ToLowerInvariant(); size=$update.Length; helper=[ordered]@{ path='halcyon-updater.exe'; sha256=(Get-FileHash (Join-Path $helper 'halcyon-updater.exe') -Algorithm SHA256).Hash.ToLowerInvariant(); size=(Get-Item (Join-Path $helper 'halcyon-updater.exe')).Length }; manualOnly=$false; allowDowngrade=$false }
+          $manifestPlatforms['windows-x86_64'] = [ordered]@{ assetId=[int64]$assetId; url="$downloadBase/$($update.Name)"; signature=[IO.File]::ReadAllText($artifactSig); sha256=(Get-FileHash $update.FullName -Algorithm SHA256).Hash.ToLowerInvariant(); size=$update.Length; helper=[ordered]@{ path='halcyon-updater.exe'; sha256=(Get-FileHash (Join-Path $helper 'halcyon-updater.exe') -Algorithm SHA256).Hash.ToLowerInvariant(); size=(Get-Item (Join-Path $helper 'halcyon-updater.exe')).Length }; manualOnly=$false; allowDowngrade=$false }
           if ($withMac) {
             $macAssetId = ($releaseObject.assets | Where-Object name -eq $mac.Name).id
             if (-not $macAssetId) { throw 'Uploaded macOS asset not found in Draft' }
-            $macEntry = [ordered]@{ assetId=[int64]$macAssetId; signature=[IO.File]::ReadAllText($macSig); sha256=(Get-FileHash $mac.FullName -Algorithm SHA256).Hash.ToLowerInvariant(); size=$mac.Length; manualOnly=$true; allowDowngrade=$false }
+            $macEntry = [ordered]@{ assetId=[int64]$macAssetId; url="$downloadBase/$($mac.Name)"; signature=[IO.File]::ReadAllText($macSig); sha256=(Get-FileHash $mac.FullName -Algorithm SHA256).Hash.ToLowerInvariant(); size=$mac.Length; manualOnly=$true; allowDowngrade=$false }
             $manifestPlatforms['darwin-aarch64'] = $macEntry
             $manifestPlatforms['darwin-x86_64'] = $macEntry
           }

@@ -147,10 +147,12 @@ try {
     $helper = Join-Path $env:TEMP "halcyon-helper-$version"
     if (Test-Path -LiteralPath $helper) { Remove-Item -LiteralPath $helper -Recurse -Force }
     Expand-Archive (Join-Path $artifacts $update.Name) $helper
+    # url 是零 API 更新源（releases/download CDN 路由）的制品地址；assetId 保留给 1.0.0 客户端
+    $downloadBase = "https://github.com/$Repository/releases/download/$releaseTag"
     $platforms = [ordered]@{}
-    $platforms['windows-x86_64'] = [ordered]@{ assetId=[int64]$assetId; signature=[IO.File]::ReadAllText($artifactSig); sha256=(Get-FileHash $updateCopy -Algorithm SHA256).Hash.ToLowerInvariant(); size=(Get-Item $updateCopy).Length; helper=[ordered]@{ path='halcyon-updater.exe'; sha256=(Get-FileHash (Join-Path $helper 'halcyon-updater.exe') -Algorithm SHA256).Hash.ToLowerInvariant(); size=(Get-Item (Join-Path $helper 'halcyon-updater.exe')).Length }; manualOnly=$false; allowDowngrade=$false }
+    $platforms['windows-x86_64'] = [ordered]@{ assetId=[int64]$assetId; url="$downloadBase/$($update.Name)"; signature=[IO.File]::ReadAllText($artifactSig); sha256=(Get-FileHash $updateCopy -Algorithm SHA256).Hash.ToLowerInvariant(); size=(Get-Item $updateCopy).Length; helper=[ordered]@{ path='halcyon-updater.exe'; sha256=(Get-FileHash (Join-Path $helper 'halcyon-updater.exe') -Algorithm SHA256).Hash.ToLowerInvariant(); size=(Get-Item (Join-Path $helper 'halcyon-updater.exe')).Length }; manualOnly=$false; allowDowngrade=$false }
     if ($withMac) {
-        $macEntry = [ordered]@{ assetId=[int64]$macAssetId; signature=[IO.File]::ReadAllText($macSig); sha256=(Get-FileHash $macCopy -Algorithm SHA256).Hash.ToLowerInvariant(); size=(Get-Item $macCopy).Length; manualOnly=$true; allowDowngrade=$false }
+        $macEntry = [ordered]@{ assetId=[int64]$macAssetId; url="$downloadBase/$($mac.Name)"; signature=[IO.File]::ReadAllText($macSig); sha256=(Get-FileHash $macCopy -Algorithm SHA256).Hash.ToLowerInvariant(); size=(Get-Item $macCopy).Length; manualOnly=$true; allowDowngrade=$false }
         $platforms['darwin-aarch64'] = $macEntry
         $platforms['darwin-x86_64'] = $macEntry
     }

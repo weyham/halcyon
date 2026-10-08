@@ -3,8 +3,9 @@
 ## 当前状态
 
 - 更新源：**公开 GitHub Releases**，仓库 `weyham/halcyon`。
-- **匿名读取，无需任何授权**（GitHub 匿名 API 限额 60 次/小时/IP，更新检查远用不满）；
-  应用不保存任何 GitHub 令牌。
+- **零 API、匿名读取，无需任何授权**：所有读取走 `releases/latest/download` CDN 路由，
+  不触碰 api.github.com（不受匿名 API 60 次/小时/IP 限额约束）；应用不保存任何 GitHub 令牌。
+  清单平台条目带 `url`（制品 CDN 地址）；`assetId` 仅保留给 1.0.0 旧客户端。
 - 校验：Release 清单、制品和 Windows updater helper 均由 minisign 公钥校验，并检查 SHA-256、大小、
   版本降级和 portable 文件白名单。
 - Windows：下载后的更新包内携带 `halcyon-updater.exe`；它只在 `app/updates/staging/<version>` 中作为临时 helper

@@ -478,8 +478,10 @@ dev `target\`）下完全 no-op，不影响正常运行。
 逐字节相同（两个通道共用同一次构建）。
 ## 10. 安装版更新通道（Velopack）
 
-安装版的应用内更新走 Velopack `UpdateManager` + `GithubSource`；portable 走原
-自研 minisign 清单 + helper/journal 链。运行形态按 §8 判定。
+安装版的应用内更新走 Velopack `UpdateManager` + `HttpSource`；portable 走
+自研 minisign 清单 + helper/journal 链。运行形态按 §8 判定。两条通道都是
+**零 API**：不触碰 api.github.com，全部读取走 `releases/latest/download`
+CDN 路由（见 §10.3）。
 
 ### 分流
 
@@ -494,8 +496,9 @@ check_update / update_download / update_install
 
 ### 授权
 
-无需授权：公开仓 Releases 匿名可读，安装版（Velopack）与便携版（自研链）的
-`GithubSource` 都不携带凭据，应用不保存任何 GitHub 令牌。
+无需授权：公开仓的 `releases/latest/download` 路由匿名可读，且不是
+api.github.com——不占匿名 API 限额（60 次/小时/IP），无需任何凭据，
+应用不保存任何 GitHub 令牌。
 ### 错误分类
 
 Velopack 错误映射为 `VelopackErrorKind`（NotInstalled / Network / Checksum /
@@ -509,35 +512,32 @@ Size / Package / Unsupported / Internal）与 `retryable`，供 UI 展示。
 `--splashProgressColor #F4622F`（品牌橙，深色底对比度足够）为硬要求：splash 缺失时
 直接报错中止，提示先跑 `packaging/velopack/make-splash.py`。
 
-### 10.2 预发布（Pre-release）开关与验收发布形态
+### 10.2 预发布（Pre-release）不可见
 
-**运行时开关**：`config.json`
+零 API 源只读 Latest Release（GitHub 的 Latest 指针从不指向 pre-release），
+两条通道都看不到 Pre-release，也没有运行时开关。联调「已装版本 → 预发布版本」
+改为直接安装对应包。
+### 10.3 双通道的零 API 读取与失败可见性
 
-```json
-{ "update": { "include_prerelease": false } }
-```
+两条通道读的都是 Latest Release 的 CDN 资产，不调用 api.github.com：
 
-- 缺省 `false`（Velopack `GithubSource` 会把 Pre-release 全部过滤掉）；
-- 显式 `true` 时 `GithubSource::new(..., true)` 保留 Pre-release，用于联调
-  「已装版本 → 预发布版本」的更新链路；
-- 保存配置后由 `start_server_inner` 刷新到 `UpdateRuntime`
-  （原子标志），随「保存并重启代理」生效；
-- 这是**运行时**配置而不是编译期开关：运行时读取才能在不重编客户端的前提下改变行为。
+| 通道 | 取版本的方式 | 下载制品的方式 |
+|---|---|---|
+| 安装版（Velopack `HttpSource`） | `releases/latest/download/releases.win.json` | 包文件名相对拼接到同一路由 |
+| 便携版（自研 minisign 链） | `releases/latest/download/latest.json`（+`.minisig`），清单自带版本号与制品 `url` | 清单里每个平台的 `url`（`releases/download/<tag>/<资产名>`） |
 
-**验收发布形态注意**：Draft Release 对只读 token 不可见（GitHub 规则），
-Pre-release 在缺省配置下会被客户端过滤——验收用发布需要显式打开
-`include_prerelease` 或发正式 Release。
-### 10.4 安装版通道的匿名读取与失败可见性
+清单平台条目同时保留 `assetId` 字段：只服务于 1.0.0 旧客户端的 API 路径，
+新客户端不再使用。`latest.json` 或 `latest.json.minisig` 缺失时自研链报
+`InvalidManifest`——是**报错**，不是「已是最新」。清单未包含本平台键
+（该平台本次未发布）时按「无更新」处理，不报错。
 
-公开仓 Releases 匿名可读（GitHub 匿名 API 限额 60 次/小时/IP，更新检查远用不满）。
-安装版（Velopack `GithubSource`）与便携版（自研 minisign 链）都不携带任何凭据，
-应用不保存 GitHub 令牌。安装版 check / download / apply 三个入口都是 async，
-不阻塞 UI 线程。
+两条通道都不携带任何凭据，应用不保存 GitHub 令牌。安装版 check / download /
+apply 三个入口都是 async，不阻塞 UI 线程。
 
 失败可见性：`set_velopack_error()` 会 `log::warn!` 记录错误分类与原始 message；
 `app_info_from_update()` 在 `UpdatePhase::Error` 时把 `view.error.message` 拼进
 `update_note`，所以关于页「检查失败」徽标旁就能看到原因。
-### 10.5 检查阶段与安装阶段的版本语义（P2）
+### 10.4 检查阶段与安装阶段的版本语义
 
 两条语义刻意分开：
 
@@ -552,24 +552,12 @@ Pre-release 在缺省配置下会被客户端过滤——验收用发布需要�
 `ensure_not_downgrade()` 保护未变，`artifact.allow_downgrade` 字段仍会被解析，
 只是不再影响检查阶段。
 
-### 10.3 双通道的更新发现机制
+### 10.5 特殊验收发布的注意事项
 
-两条通道读的不是同一份东西：
-
-| 通道 | 取版本的方式 | 对 Pre-release 的态度 |
-|---|---|---|
-| 安装版（Velopack） | `GET /repos/.../releases?per_page=10` 列全部 release，按 `published_at` 排序 | `include_prerelease=false` 时过滤掉 |
-| 便携版（自研 minisign 链） | `GET /repos/.../releases/latest`（GitHub 的「Latest」归属） | 不看 pre 标记，只看 latest 指向谁 |
-
-自研链的硬要求（`core/src/update/github.rs`）：latest 指向的 release **必须带
-`latest.json` 与 `latest.json.minisig`**，否则报
-`InvalidManifest("Release 缺少 latest.json")`——是**报错**，不是「已是最新」。
-
-因此有特殊验收发布时要注意两件事：
-
-1. Latest 归属决定自研链看到什么：`/releases/latest` 指向的 release 的版本
-   若低于本地，检查更新稳定返回「已是最新」，不会误升级、也不会报错；
-2. 不是给自研链用的 release 不要放 `latest.json` / `latest.json.minisig`：
+1. Latest 归属决定客户端看到什么：`releases/latest/download/latest.json` 跟随
+   GitHub 的「Latest」指针；Latest 指向的 release 版本若低于本地，检查更新稳定
+   返回「已是最新」，不会误升级、也不会报错；
+2. 不是给更新链用的 release 不要放 `latest.json` / `latest.json.minisig`：
    这两个文件由离线私钥（minisign）签名，一旦存在就会进入升级链路。
 `vpk pack` 后，用 `build-portable.ps1` 自产 portable zip 覆盖
 `dist\velopack\Halcyon-win-Portable.zip`（保持 vpk 文件名），并校验 zip 含
