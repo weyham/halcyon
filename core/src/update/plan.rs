@@ -49,7 +49,15 @@ pub async fn check_for_update_for_platform(
             .map_err(|error| UpdateError::InvalidSignature(error.to_string()))?,
     )?;
     let platform = platform.to_string();
-    let artifact = manifest.select_platform(&platform)?;
+    // 缺键容错：清单签名有效但未包含本平台键（该平台本次未发布），按「无更新」处理而非报错。
+    let artifact = match manifest.select_platform(&platform) {
+        Ok(artifact) => artifact,
+        Err(UpdateError::UnsupportedPlatform) => {
+            log::info!("更新清单未包含平台 {platform} 的键（该平台本次未发布），按「无更新」处理");
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
     // P2：检查阶段「清单版本 ≤ 本地版本」一律算「已是最新」。
     // 检查阶段只回答「有没有更新」：清单版本低于本地即视为已是最新，
     // 不做降级拒绝判断——否则 `/releases/latest` 停在旧版本（其清单没跟着升）时
@@ -82,10 +90,12 @@ pub async fn stage_update(
     if offer.artifact.manual_only {
         return Err(UpdateError::UnsupportedPlatform);
     }
-    let Some(asset_id) = offer.artifact.asset_id else {
-        return Err(UpdateError::InvalidManifest("制品缺少 assetId".into()));
-    };
-    let artifact_bytes = source.fetch_artifact(asset_id, offer.artifact.size).await?;
+    if offer.artifact.url.is_none() {
+        return Err(UpdateError::InvalidManifest("制品缺少 url".into()));
+    }
+    let artifact_bytes = source
+        .fetch_artifact(&offer.artifact, offer.artifact.size)
+        .await?;
     verify_size(artifact_bytes.len(), offer.artifact.size)?;
     verify_artifact(public_key, &artifact_bytes, &offer.artifact.signature)?;
     verify_sha256(&artifact_bytes, &offer.artifact.sha256)?;
@@ -185,6 +195,7 @@ mod tests {
                 "platforms": {
                     "windows-x86_64": {
                         "assetId": 7,
+                        "url": "https://example.invalid/update.zip",
                         "signature": artifact_signature,
                         "sha256": sha256,
                         "size": zip.len(),
@@ -228,10 +239,7 @@ mod tests {
             }
             Ok(Some(ResolvedRelease {
                 tag: "v1.0.1".into(),
-                manifest_asset_id: 10,
-                manifest_signature_asset_id: 11,
                 html_url: "https://example.invalid/release".into(),
-                etag: None,
             }))
         }
 
@@ -248,7 +256,7 @@ mod tests {
 
         async fn fetch_artifact(
             &self,
-            _asset_id: u64,
+            _artifact: &PlatformArtifact,
             _max_size: u64,
         ) -> Result<Vec<u8>, UpdateError> {
             Ok(self.artifact.clone())
@@ -327,7 +335,7 @@ mod tests {
         ));
 
         let mut missing_asset = offer.clone();
-        missing_asset.artifact.asset_id = None;
+        missing_asset.artifact.url = None;
         assert!(matches!(
             stage_update(&source, &missing_asset, &public_key, root.path()).await,
             Err(UpdateError::InvalidManifest(_))
@@ -362,6 +370,19 @@ mod tests {
             "1.0.1"
         );
     }
+    #[tokio::test]
+    async fn missing_platform_key_is_no_update() {
+        // 缺键容错：清单有效但未包含本平台（如 macOS 清单缺 darwin-*），按「无更新」处理
+        let (source, public_key) = FakeSource::new();
+        let result = check_for_update_for_platform(&source, "1.0.0", &public_key, "darwin-aarch64")
+            .await
+            .unwrap();
+        assert!(
+            result.is_none(),
+            "清单缺少本平台键时必须返回「无更新」而非报错"
+        );
+    }
+
     #[tokio::test]
     async fn wrapper_reports_no_update_when_release_is_missing() {
         let (mut source, public_key) = FakeSource::new();

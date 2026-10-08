@@ -52,11 +52,7 @@ pub struct HelperArtifact {
 #[serde(rename_all = "camelCase")]
 pub struct ResolvedRelease {
     pub tag: String,
-    pub manifest_asset_id: u64,
-    pub manifest_signature_asset_id: u64,
     pub html_url: String,
-    #[serde(default)]
-    pub etag: Option<String>,
 }
 
 #[derive(Clone)]

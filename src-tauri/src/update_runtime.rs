@@ -57,18 +57,10 @@ pub struct UpdateRuntime {
     state: Mutex<RuntimeState>,
     /// Velopack 判定出的运行形态（installed / portable / 非 Velopack）。
     install_kind: InstallKind,
-    /// 安装版更新是否包含 pre-release（运行时配置 `update.include_prerelease`）。
-    ///
-    /// 1.0.6 那个已打包的二进制把它写死成 false，只有运行时读取才有意义；
-    /// 保存配置 → 重启代理 后由 app 侧刷新。
-    include_prerelease: std::sync::atomic::AtomicBool,
 }
 
 impl UpdateRuntime {
-    pub fn new(
-        current_version: impl Into<String>,
-        include_prerelease: bool,
-    ) -> Result<Self, String> {
+    pub fn new(current_version: impl Into<String>) -> Result<Self, String> {
         let source = Arc::new(
             GitHubReleaseSource::new(GitHubSourceConfig::default())
                 .map_err(|error| error.to_string())?,
@@ -79,19 +71,7 @@ impl UpdateRuntime {
             current_version: current_version.into(),
             state: Mutex::new(RuntimeState::default()),
             install_kind: velopack_runtime::detect_install_kind(),
-            include_prerelease: std::sync::atomic::AtomicBool::new(include_prerelease),
         })
-    }
-
-    /// 刷新「是否包含 pre-release」（配置加载 / 保存重启后调用）。
-    pub fn set_include_prerelease(&self, value: bool) {
-        self.include_prerelease
-            .store(value, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    fn include_prerelease(&self) -> bool {
-        self.include_prerelease
-            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub async fn view(&self) -> UpdateStateView {
@@ -268,7 +248,7 @@ impl UpdateRuntime {
             state.error = None;
         }
         // 公开仓：Velopack 通道同样匿名读取。
-        match velopack_runtime::check_for_updates(self.include_prerelease()) {
+        match velopack_runtime::check_for_updates() {
             Ok(Some(info)) => {
                 let version = info.TargetFullRelease.Version.clone();
                 let notes = {
@@ -325,7 +305,7 @@ impl UpdateRuntime {
             state.phase = Some(UpdatePhase::Downloading);
             state.error = None;
         }
-        match velopack_runtime::download_updates(&update, None, self.include_prerelease()) {
+        match velopack_runtime::download_updates(&update, None) {
             Ok(()) => {
                 let mut state = self.state.lock().unwrap();
                 state.phase = Some(UpdatePhase::ReadyToInstall);
@@ -353,7 +333,7 @@ impl UpdateRuntime {
                 })?
         };
         self.mark_installing();
-        velopack_runtime::apply_updates_and_restart(&update, self.include_prerelease())
+        velopack_runtime::apply_updates_and_restart(&update)
     }
 
     fn set_velopack_error(&self, error: &VelopackErrorView) {
@@ -427,7 +407,6 @@ impl UpdateRuntime {
             current_version: current_version.into(),
             state: Mutex::new(RuntimeState::default()),
             install_kind: InstallKind::NotVelopack,
-            include_prerelease: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -436,7 +415,8 @@ impl UpdateRuntime {
 mod tests {
     use super::*;
     use halcyon_core::update::{
-        GitHubErrorInfo, ManifestEnvelope, ResolvedRelease, UpdateSourceErrorCode, UpdateSourceKind,
+        GitHubErrorInfo, ManifestEnvelope, PlatformArtifact, ResolvedRelease,
+        UpdateSourceErrorCode, UpdateSourceKind,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -477,7 +457,7 @@ mod tests {
 
         async fn fetch_artifact(
             &self,
-            _asset_id: u64,
+            _artifact: &PlatformArtifact,
             _max_size: u64,
         ) -> Result<Vec<u8>, UpdateError> {
             Err(UpdateError::Internal("not implemented".into()))

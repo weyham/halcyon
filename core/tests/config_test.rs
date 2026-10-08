@@ -291,33 +291,8 @@ fn repo_config_example_is_valid() {
 }
 
 #[test]
-fn update_include_prerelease_defaults_to_false() {
-    // 配置里完全没有 update 段：必须等价于 1.0.6 的现状语义（过滤 pre-release）
-    let cfg: Config = serde_json::from_str("{}").unwrap();
-    assert!(!cfg.update.include_prerelease);
-    let resolved = ResolvedConfig::try_from(cfg).unwrap();
-    assert!(
-        !resolved.include_prerelease,
-        "缺省必须是 false，否则 1.0.7 会悄悄开始接受预发布"
-    );
-}
-
-#[test]
-fn update_include_prerelease_reads_explicit_value() {
+fn legacy_update_section_is_tolerated() {
+    // 兼容：旧配置里的 update.include_prerelease 段（已随零 API 更新源移除）必须能解析且不生效
     let cfg: Config = serde_json::from_str(r#"{"update":{"include_prerelease":true}}"#).unwrap();
-    assert!(cfg.update.include_prerelease);
-    assert!(ResolvedConfig::try_from(cfg).unwrap().include_prerelease);
-
-    // 显式 false 同样成立（round-trip 不被默认值覆盖）
-    let cfg: Config = serde_json::from_str(r#"{"update":{"include_prerelease":false}}"#).unwrap();
-    assert!(!ResolvedConfig::try_from(cfg).unwrap().include_prerelease);
-}
-
-#[test]
-fn update_section_round_trips_through_json() {
-    // 面板保存配置走的是 Config 的 JSON round-trip，开关不能在这里丢
-    let cfg: Config = serde_json::from_str(r#"{"update":{"include_prerelease":true}}"#).unwrap();
-    let text = serde_json::to_string(&cfg).unwrap();
-    let back: Config = serde_json::from_str(&text).unwrap();
-    assert!(back.update.include_prerelease);
+    assert!(ResolvedConfig::try_from(cfg).is_ok());
 }

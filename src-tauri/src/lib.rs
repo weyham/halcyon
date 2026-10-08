@@ -116,12 +116,8 @@ pub struct ShimState {
 impl Default for ShimState {
     fn default() -> Self {
         Self {
-            update: update_runtime::UpdateRuntime::new(
-                env!("CARGO_PKG_VERSION"),
-                // 运行时配置：缺省 false = 保持 1.0.6 的现状语义（过滤 pre-release）。
-                config::load_default().0.update.include_prerelease,
-            )
-            .expect("初始化更新运行时失败"),
+            update: update_runtime::UpdateRuntime::new(env!("CARGO_PKG_VERSION"))
+                .expect("初始化更新运行时失败"),
             server: Mutex::new(None),
             config_source: Mutex::new(String::new()),
             last_error: Mutex::new(String::new()),
@@ -163,10 +159,7 @@ fn start_server_inner(app: &AppHandle) {
         log::warn!("配置中没有路由（来源：{source}），代理未启动");
         return;
     }
-    // 安装版更新通道的 pre-release 开关随后端配置生效（保存配置 → 重启代理）。
-    state
-        .update
-        .set_include_prerelease(resolved.include_prerelease);
+
     *state.routes.lock().unwrap() = resolved.routes.clone();
     let listen = resolved.listen.clone();
     match halcyon_core::server::start_with_log_health(resolved, Some(state.log_health.clone())) {

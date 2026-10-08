@@ -322,7 +322,11 @@ pub trait UpdateSource: Send + Sync {
         &self,
         release: &ResolvedRelease,
     ) -> Result<ManifestEnvelope, UpdateError>;
-    async fn fetch_artifact(&self, asset_id: u64, max_size: u64) -> Result<Vec<u8>, UpdateError>;
+    async fn fetch_artifact(
+        &self,
+        artifact: &PlatformArtifact,
+        max_size: u64,
+    ) -> Result<Vec<u8>, UpdateError>;
 }
 
 #[cfg(test)]

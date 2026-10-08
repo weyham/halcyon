@@ -6,11 +6,15 @@
 //! 判定为准。
 
 use serde::Serialize;
-use velopack::sources::{GithubSource, NoneSource};
+use velopack::sources::{HttpSource, NoneSource};
 use velopack::{UpdateCheck, UpdateInfo, UpdateManager};
 
-/// 现有更新源（私有 GitHub 仓库），与自研 minisign 清单链一致。
+/// 仓库主页（UI「查看发布」链接）。
 pub const GITHUB_REPO_URL: &str = "https://github.com/weyham/halcyon";
+
+/// 零 API 更新源：`releases/latest/download` 是 CDN 路由，不占 api.github.com 匿名限额。
+/// Velopack HttpSource 会取 `<base>/releases.win.json`，包文件按相对文件名拼到同一 base。
+const UPDATE_FEED_URL: &str = "https://github.com/weyham/halcyon/releases/latest/download";
 
 /// 运行形态（Velopack 维度）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -111,40 +115,17 @@ pub fn classify_error(error: &velopack::Error) -> VelopackErrorView {
     }
 }
 
-/// 客户端「能看到哪些 release」的判定，与 velopack 1.2.161 的
-/// `GithubSource::get_releases()` 语义一致：
+/// 构造 UpdateManager（HttpSource，零 API 匿名读取公开仓）。
 ///
-/// ```text
-/// if !self.prerelease { releases.retain(|r| !r.prerelease); }
-/// ```
-///
-/// 也就是 `include_prerelease = false` 时**把 Pre-release 全部过滤掉**。
-/// 这里把该语义固化成可单测的形式，作为「配置缺省 false → 过滤 / 显式 true →
-/// 保留」的回归锚点（`config.update.include_prerelease`）。
-pub fn visible_releases<'a>(
-    releases: impl IntoIterator<Item = &'a bool>,
-    include_prerelease: bool,
-) -> Vec<bool> {
-    releases
-        .into_iter()
-        .copied()
-        .filter(|is_prerelease| include_prerelease || !*is_prerelease)
-        .collect()
-}
-
-/// 构造 UpdateManager（GithubSource，**匿名读取公开仓**）。
-///
-/// `include_prerelease` 来自运行时配置 `config.update.include_prerelease`（缺省 false）。
-pub fn build_manager(include_prerelease: bool) -> Result<UpdateManager, VelopackErrorView> {
-    let source = GithubSource::new(GITHUB_REPO_URL, None, include_prerelease);
+/// 零 API 源只暴露 Latest Release（天然不含 pre-release），等价于「过滤 pre-release」语义。
+pub fn build_manager() -> Result<UpdateManager, VelopackErrorView> {
+    let source = HttpSource::new(UPDATE_FEED_URL);
     UpdateManager::new(source, None, None).map_err(|error| classify_error(&error))
 }
 
 /// 检查更新；返回可用的 UpdateInfo（None = 已是最新或源为空）。
-pub fn check_for_updates(
-    include_prerelease: bool,
-) -> Result<Option<UpdateInfo>, VelopackErrorView> {
-    let manager = build_manager(include_prerelease)?;
+pub fn check_for_updates() -> Result<Option<UpdateInfo>, VelopackErrorView> {
+    let manager = build_manager()?;
     match manager.check_for_updates() {
         Ok(UpdateCheck::UpdateAvailable(info)) => Ok(Some(*info)),
         Ok(_) => Ok(None),
@@ -156,20 +137,16 @@ pub fn check_for_updates(
 pub fn download_updates(
     update: &UpdateInfo,
     progress: Option<std::sync::mpsc::Sender<i16>>,
-    include_prerelease: bool,
 ) -> Result<(), VelopackErrorView> {
-    let manager = build_manager(include_prerelease)?;
+    let manager = build_manager()?;
     manager
         .download_updates(update, progress)
         .map_err(|error| classify_error(&error))
 }
 
 /// 应用已下载的更新并重启应用。
-pub fn apply_updates_and_restart(
-    update: &UpdateInfo,
-    include_prerelease: bool,
-) -> Result<(), VelopackErrorView> {
-    let manager = build_manager(include_prerelease)?;
+pub fn apply_updates_and_restart(update: &UpdateInfo) -> Result<(), VelopackErrorView> {
+    let manager = build_manager()?;
     manager
         .apply_updates_and_restart(update)
         .map_err(|error| classify_error(&error))
@@ -229,20 +206,6 @@ mod tests {
         assert!(InstallKind::Installed.is_installed());
         assert!(!InstallKind::VelopackPortable.is_installed());
         assert!(!InstallKind::NotVelopack.is_installed());
-    }
-
-    #[test]
-    fn prerelease_filtering_follows_config() {
-        // 缺省 false：Pre-release 被过滤（与 velopack GithubSource 的 retain 一致）
-        assert_eq!(visible_releases([&false, &true, &true], false), vec![false]);
-        // 显式 true：保留
-        assert_eq!(
-            visible_releases([&false, &true, &true], true),
-            vec![false, true, true]
-        );
-        // 边界：全是 pre-release / 空列表
-        assert!(visible_releases([&true], false).is_empty());
-        assert!(visible_releases(std::iter::empty::<&bool>(), false).is_empty());
     }
 
     #[test]

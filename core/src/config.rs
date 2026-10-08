@@ -164,18 +164,6 @@ impl Default for RouteEntry {
     }
 }
 
-/// 更新通道的运行时开关（可选段，缺省即现状语义）。
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct UpdateCfg {
-    /// 是否把 pre-release 也算作可用更新。
-    ///
-    /// 缺省 `false`（Velopack `GithubSource` 会把 pre-release 全部过滤掉）。
-    /// 显式 `true` 时保留 pre-release，用于联调「已装版本 → 预发布版本」的
-    /// 更新链路；生产默认不开。
-    pub include_prerelease: bool,
-}
-
 /// 配置文件（JSON 与旧 TOML 共用同一形状）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -186,8 +174,6 @@ pub struct Config {
     pub routes: BTreeMap<String, RouteEntry>,
     pub default_route: Option<String>,
     pub orphan_header: bool,
-    /// 安装版更新通道的运行时开关（见 [`UpdateCfg`]）。
-    pub update: UpdateCfg,
 }
 
 impl Default for Config {
@@ -199,7 +185,6 @@ impl Default for Config {
             routes: BTreeMap::new(),
             default_route: None,
             orphan_header: true,
-            update: UpdateCfg::default(),
         }
     }
 }
@@ -213,8 +198,6 @@ pub struct ResolvedConfig {
     pub routes: Vec<Route>,
     pub default_route: Option<String>,
     pub orphan_header: bool,
-    /// 安装版更新是否包含 pre-release（`config.update.include_prerelease`）。
-    pub include_prerelease: bool,
 }
 
 impl ResolvedConfig {
@@ -354,7 +337,6 @@ impl TryFrom<Config> for ResolvedConfig {
             routes,
             default_route: data.default_route.filter(|s| !s.is_empty()),
             orphan_header: data.orphan_header,
-            include_prerelease: data.update.include_prerelease,
         })
     }
 }

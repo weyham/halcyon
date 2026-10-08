@@ -1,12 +1,10 @@
 use crate::update::{
-    GitHubErrorInfo, ManifestEnvelope, ResolvedRelease, UpdateError, UpdateSource,
-    UpdateSourceErrorCode, UpdateSourceKind,
+    GitHubErrorInfo, ManifestEnvelope, PlatformArtifact, ResolvedRelease, UpdateError,
+    UpdateManifest, UpdateSource, UpdateSourceErrorCode, UpdateSourceKind,
 };
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use reqwest::header::{ACCEPT, ETAG, IF_NONE_MATCH};
 use reqwest::{Client, StatusCode};
-use serde::Deserialize;
 use std::time::{SystemTime, UNIX_EPOCH};
 use url::Url;
 
@@ -14,10 +12,10 @@ use url::Url;
 pub struct GitHubSourceConfig {
     pub owner: String,
     pub repo: String,
-    pub api_base: String,
+    /// 站点基址（默认 https://github.com；测试指向 mock 服务器）。
+    pub site_base: String,
     pub allow_insecure_http: bool,
     pub allow_any_host: bool,
-    pub include_prerelease: bool,
     pub allowed_redirect_hosts: Vec<String>,
 }
 
@@ -26,12 +24,10 @@ impl Default for GitHubSourceConfig {
         Self {
             owner: "weyham".to_string(),
             repo: "halcyon".to_string(),
-            api_base: "https://api.github.com".to_string(),
+            site_base: "https://github.com".to_string(),
             allow_insecure_http: false,
             allow_any_host: false,
-            include_prerelease: option_env!("HALCYON_UPDATE_INCLUDE_PRERELEASE") == Some("1"),
             allowed_redirect_hosts: vec![
-                "api.github.com".into(),
                 "github.com".into(),
                 "objects.githubusercontent.com".into(),
                 "release-assets.githubusercontent.com".into(),
@@ -40,32 +36,29 @@ impl Default for GitHubSourceConfig {
     }
 }
 
-// 公开仓的 release 匿名可读：更新检查不再携带任何凭据，也没有授权流程。
-// 仅保留传输与状态映射；GitHub 匿名 API 限额 60 次/小时/IP，更新检查远用不满。
+// 零 API 更新源：全程走 github.com 的 release 下载路由
+// （releases/latest/download/<资产名>），不触碰 api.github.com。
+// 网页/CDN 路由不受匿名 API 限额（60 次/小时/IP）约束，公开仓无需任何凭据。
+// 清单 latest.json 自带版本号与制品 URL，因此连 tag 解析都不需要 API。
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EndpointKind {
-    RepoLatestRelease,
-    ManifestAsset,
-    ManifestSignatureAsset,
-    ArtifactAsset,
+    ManifestLatest,
+    ManifestSignature,
+    Artifact,
 }
 
 impl EndpointKind {
     fn as_str(self) -> &'static str {
         match self {
-            Self::RepoLatestRelease => "repo_latest_release",
-            Self::ManifestAsset => "manifest_asset",
-            Self::ManifestSignatureAsset => "manifest_signature_asset",
-            Self::ArtifactAsset => "artifact_asset",
+            Self::ManifestLatest => "manifest_latest",
+            Self::ManifestSignature => "manifest_signature",
+            Self::Artifact => "artifact",
         }
     }
 
     fn is_asset(self) -> bool {
-        matches!(
-            self,
-            Self::ManifestAsset | Self::ManifestSignatureAsset | Self::ArtifactAsset
-        )
+        true
     }
 }
 
@@ -135,7 +128,7 @@ fn trace_http_response(
 pub struct GitHubReleaseSource {
     config: GitHubSourceConfig,
     http: Client,
-    release_cache: std::sync::Mutex<Option<ResolvedRelease>>,
+    envelope_cache: std::sync::Mutex<Option<ManifestEnvelope>>,
 }
 
 impl GitHubReleaseSource {
@@ -148,106 +141,46 @@ impl GitHubReleaseSource {
         Ok(Self {
             config,
             http,
-            release_cache: std::sync::Mutex::new(None),
+            envelope_cache: std::sync::Mutex::new(None),
         })
     }
 
-    fn api_url(&self, path: &str) -> String {
-        format!("{}{}", self.config.api_base.trim_end_matches('/'), path)
+    /// `releases/latest/download/<资产名>` 下载路由。
+    fn download_url(&self, asset_name: &str) -> String {
+        format!(
+            "{}/{}/{}/releases/latest/download/{}",
+            self.config.site_base.trim_end_matches('/'),
+            self.config.owner,
+            self.config.repo,
+            asset_name
+        )
     }
 
-    async fn get_json<T>(
+    async fn fetch_bytes(
         &self,
-        url: &str,
-        etag: Option<&str>,
-    ) -> Result<(Option<String>, T), UpdateError>
-    where
-        T: for<'de> Deserialize<'de>,
-    {
-        let host = url_host(url);
-        let mut request = self
-            .http
-            .get(url)
-            .header(ACCEPT, "application/vnd.github+json");
-        if let Some(etag) = etag {
-            request = request.header(IF_NONE_MATCH, etag);
-        }
-        let response = request.send().await.map_err(map_transport_error)?;
-        let status = response.status();
-        if status == StatusCode::NOT_MODIFIED {
-            return Err(UpdateError::Internal("not_modified".into()));
-        }
-        if !status.is_success() {
-            let headers = response.headers().clone();
-            let error_body = if status == StatusCode::FORBIDDEN {
-                response.text().await.ok()
-            } else {
-                None
-            };
-            let error = map_status(
-                status,
-                Some(&headers),
-                error_body.as_deref(),
-                EndpointKind::RepoLatestRelease,
-                Some(&host),
-            );
-            trace_http_response(
-                EndpointKind::RepoLatestRelease,
-                "GET",
-                &host,
-                false,
-                status,
-                &headers,
-                None,
-                Some(&error),
-            );
-            return Err(error);
-        }
-        trace_http_response(
-            EndpointKind::RepoLatestRelease,
-            "GET",
-            &host,
-            false,
-            status,
-            response.headers(),
-            None,
-            None,
-        );
-        let next_etag = response
-            .headers()
-            .get(ETAG)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_string);
-        let value = response.json().await.map_err(map_transport_error)?;
-        Ok((next_etag, value))
-    }
-
-    async fn fetch_asset_bytes(
-        &self,
-        asset_id: u64,
+        url: Url,
         max_size: u64,
         endpoint: EndpointKind,
     ) -> Result<Vec<u8>, UpdateError> {
-        let mut url = Url::parse(&self.api_url(&format!(
-            "/repos/{}/{}/releases/assets/{}",
-            self.config.owner, self.config.repo, asset_id
-        )))
-        .map_err(|error| UpdateError::Internal(error.to_string()))?;
-
+        let mut url = url;
         for _ in 0..=5 {
             ensure_allowed_url(&url, &self.config)?;
-            let request = self
+            let response = self
                 .http
                 .get(url.clone())
-                .header(ACCEPT, "application/octet-stream");
-            let response = request.send().await.map_err(map_transport_error)?;
+                .send()
+                .await
+                .map_err(map_transport_error)?;
             let status = response.status();
-            if status == StatusCode::FOUND {
+            if matches!(
+                status,
+                StatusCode::FOUND | StatusCode::MOVED_PERMANENTLY | StatusCode::TEMPORARY_REDIRECT
+            ) {
                 let location = response
                     .headers()
                     .get(reqwest::header::LOCATION)
                     .and_then(|value| value.to_str().ok())
-                    .ok_or_else(|| UpdateError::Internal("302 缺少 Location".into()))?;
+                    .ok_or_else(|| UpdateError::Internal("重定向缺少 Location".into()))?;
                 let next = url
                     .join(location)
                     .map_err(|error| UpdateError::Internal(error.to_string()))?;
@@ -345,124 +278,77 @@ impl UpdateSource for GitHubReleaseSource {
     }
 
     async fn resolve_latest_release(&self) -> Result<Option<ResolvedRelease>, UpdateError> {
-        let cached_etag = self
-            .release_cache
-            .lock()
-            .ok()
-            .and_then(|cache| cache.as_ref().and_then(|release| release.etag.clone()));
-        let (etag, release) = if self.config.include_prerelease {
-            let url = self.api_url(&format!(
-                "/repos/{}/{}/releases?per_page=20",
-                self.config.owner, self.config.repo
-            ));
-            let (etag, releases) = self
-                .get_json::<Vec<GitHubRelease>>(&url, cached_etag.as_deref())
-                .await?;
-            let release = releases.into_iter().find(|release| {
-                release
-                    .assets
-                    .iter()
-                    .any(|asset| asset.name == "latest.json")
-                    && release
-                        .assets
-                        .iter()
-                        .any(|asset| asset.name == "latest.json.minisig")
-            });
-            let Some(release) = release else {
-                return Ok(None);
-            };
-            (etag, release)
-        } else {
-            let url = self.api_url(&format!(
-                "/repos/{}/{}/releases/latest",
-                self.config.owner, self.config.repo
-            ));
-            match self
-                .get_json::<GitHubRelease>(&url, cached_etag.as_deref())
-                .await
-            {
-                Ok(value) => value,
-                Err(UpdateError::Internal(message)) if message == "not_modified" => {
-                    return self
-                        .release_cache
-                        .lock()
-                        .ok()
-                        .and_then(|cache| cache.clone())
-                        .map(Some)
-                        .ok_or_else(|| {
-                            UpdateError::InvalidManifest("304 响应缺少本地缓存".into())
-                        });
+        let manifest_url = Url::parse(&self.download_url("latest.json"))
+            .map_err(|error| UpdateError::Internal(error.to_string()))?;
+        let manifest_bytes = match self
+            .fetch_bytes(manifest_url, 1024 * 1024, EndpointKind::ManifestLatest)
+            .await
+        {
+            Ok(bytes) => bytes,
+            // 还没有任何已发布 Release 时该路由返回 404，视为「无更新」
+            Err(UpdateError::GitHub(info)) if info.status == 404 => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let manifest = UpdateManifest::parse(&manifest_bytes)?;
+        let signature_url = Url::parse(&self.download_url("latest.json.minisig"))
+            .map_err(|error| UpdateError::Internal(error.to_string()))?;
+        let signature_bytes = self
+            .fetch_bytes(signature_url, 1024 * 1024, EndpointKind::ManifestSignature)
+            .await
+            .map_err(|error| match error {
+                UpdateError::GitHub(info) if info.status == 404 => {
+                    UpdateError::InvalidManifest("Release 缺少 latest.json.minisig".into())
                 }
-                Err(error) => return Err(error),
-            }
-        };
-        let manifest = release
-            .assets
-            .iter()
-            .find(|asset| asset.name == "latest.json")
-            .ok_or_else(|| UpdateError::InvalidManifest("Release 缺少 latest.json".into()))?;
-        let signature = release
-            .assets
-            .iter()
-            .find(|asset| asset.name == "latest.json.minisig")
-            .ok_or_else(|| {
-                UpdateError::InvalidManifest("Release 缺少 latest.json.minisig".into())
+                other => other,
             })?;
-        let resolved = ResolvedRelease {
-            tag: release.tag_name,
-            manifest_asset_id: manifest.id,
-            manifest_signature_asset_id: signature.id,
-            html_url: release.html_url,
-            etag,
+        let release = ResolvedRelease {
+            tag: format!("v{}", manifest.version),
+            html_url: format!(
+                "{}/{}/{}/releases/tag/v{}",
+                self.config.site_base.trim_end_matches('/'),
+                self.config.owner,
+                self.config.repo,
+                manifest.version
+            ),
         };
-        if let Ok(mut cache) = self.release_cache.lock() {
-            *cache = Some(resolved.clone());
+        let envelope = ManifestEnvelope {
+            manifest_bytes,
+            signature_bytes,
+            release: release.clone(),
+        };
+        if let Ok(mut cache) = self.envelope_cache.lock() {
+            *cache = Some(envelope);
         }
-        Ok(Some(resolved))
+        Ok(Some(release))
     }
 
     async fn fetch_manifest(
         &self,
         release: &ResolvedRelease,
     ) -> Result<ManifestEnvelope, UpdateError> {
-        let manifest_bytes = self
-            .fetch_asset_bytes(
-                release.manifest_asset_id,
-                1024 * 1024,
-                EndpointKind::ManifestAsset,
-            )
-            .await?;
-        let signature_bytes = self
-            .fetch_asset_bytes(
-                release.manifest_signature_asset_id,
-                1024 * 1024,
-                EndpointKind::ManifestSignatureAsset,
-            )
-            .await?;
-        Ok(ManifestEnvelope {
-            manifest_bytes,
-            signature_bytes,
-            release: release.clone(),
-        })
+        // 清单与签名在 resolve 阶段已一并下载，这里直接返回缓存
+        self.envelope_cache
+            .lock()
+            .ok()
+            .and_then(|cache| cache.clone())
+            .filter(|envelope| envelope.release.tag == release.tag)
+            .ok_or_else(|| UpdateError::Internal("resolve_latest_release 尚未完成".into()))
     }
 
-    async fn fetch_artifact(&self, asset_id: u64, max_size: u64) -> Result<Vec<u8>, UpdateError> {
-        self.fetch_asset_bytes(asset_id, max_size, EndpointKind::ArtifactAsset)
+    async fn fetch_artifact(
+        &self,
+        artifact: &PlatformArtifact,
+        max_size: u64,
+    ) -> Result<Vec<u8>, UpdateError> {
+        let url = artifact
+            .url
+            .as_deref()
+            .ok_or_else(|| UpdateError::InvalidManifest("制品缺少 url".into()))?;
+        let url =
+            Url::parse(url).map_err(|error| UpdateError::InvalidManifest(error.to_string()))?;
+        self.fetch_bytes(url, max_size, EndpointKind::Artifact)
             .await
     }
-}
-
-#[derive(Deserialize)]
-struct GitHubRelease {
-    tag_name: String,
-    html_url: String,
-    assets: Vec<GitHubAsset>,
-}
-
-#[derive(Deserialize)]
-struct GitHubAsset {
-    id: u64,
-    name: String,
 }
 
 fn now_epoch() -> i64 {
@@ -539,7 +425,7 @@ fn map_status(
         StatusCode::FORBIDDEN if endpoint.is_asset() => (
             UpdateSourceErrorCode::AssetDownloadForbidden,
             format!(
-                "GitHub 资产下载被主机 {} 拒绝（HTTP 403），这不是 GitHub App 仓库权限问题",
+                "GitHub 资产下载被主机 {} 拒绝（HTTP 403）",
                 host.unwrap_or("unknown")
             ),
             true,
@@ -616,10 +502,9 @@ mod tests {
         GitHubSourceConfig {
             owner: "weyham".to_string(),
             repo: "halcyon".to_string(),
-            api_base: server.uri(),
+            site_base: server.uri(),
             allow_insecure_http: true,
             allow_any_host: false,
-            include_prerelease: false,
             allowed_redirect_hosts: vec!["127.0.0.1".into(), "localhost".into()],
         }
     }
@@ -628,28 +513,46 @@ mod tests {
         GitHubReleaseSource::new(config_for(server)).unwrap()
     }
 
+    fn manifest_json() -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "schema": 1,
+            "protocol": 1,
+            "version": "1.0.1",
+            "platforms": {
+                "windows-x86_64": {
+                    "url": "https://github.com/weyham/halcyon/releases/download/v1.0.1/halcyon-v1.0.1-windows-x64-update.zip",
+                    "signature": "sig",
+                    "sha256": "0".repeat(64),
+                    "size": 1
+                }
+            }
+        }))
+        .unwrap()
+    }
+
     #[test]
     fn default_source_targets_halcyon_repository() {
         let config = GitHubSourceConfig::default();
         assert_eq!(config.owner, "weyham");
         assert_eq!(config.repo, "halcyon");
-        assert_eq!(config.api_base, "https://api.github.com");
+        assert_eq!(config.site_base, "https://github.com");
     }
 
-    /// 公开仓：不带任何凭据即可解析 latest release（响应不含 Authorization 头）。
+    /// 零 API：清单与签名经 releases/latest/download 路由获取，tag 由清单版本构造。
     #[tokio::test]
-    async fn resolves_latest_release_without_credentials() {
+    async fn resolves_manifest_from_download_route() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/repos/weyham/halcyon/releases/latest"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "tag_name": "v1.0.0",
-                "html_url": "https://github.com/weyham/halcyon/releases/tag/v1.0.0",
-                "assets": [
-                    {"id": 10, "name": "latest.json"},
-                    {"id": 11, "name": "latest.json.minisig"}
-                ]
-            })))
+            .and(path("/weyham/halcyon/releases/latest/download/latest.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(manifest_json()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/weyham/halcyon/releases/latest/download/latest.json.minisig",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"sig-bytes".to_vec()))
             .expect(1)
             .mount(&server)
             .await;
@@ -660,21 +563,47 @@ mod tests {
             .await
             .unwrap()
             .expect("release 应可解析");
-        assert_eq!(resolved.tag, "v1.0.0");
-        assert_eq!(resolved.manifest_asset_id, 10);
-        assert_eq!(resolved.manifest_signature_asset_id, 11);
+        assert_eq!(resolved.tag, "v1.0.1");
+        assert!(resolved.html_url.ends_with("/releases/tag/v1.0.1"));
+
+        let envelope = source.fetch_manifest(&resolved).await.unwrap();
+        assert_eq!(
+            UpdateManifest::parse(&envelope.manifest_bytes)
+                .unwrap()
+                .version,
+            "1.0.1"
+        );
+        assert_eq!(envelope.signature_bytes, b"sig-bytes");
     }
 
+    /// 没有任何已发布 Release 时（404）按「无更新」处理。
     #[tokio::test]
-    async fn missing_latest_json_is_rejected_as_invalid_manifest() {
+    async fn missing_manifest_returns_none() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/repos/weyham/halcyon/releases/latest"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "tag_name": "v1.0.0",
-                "html_url": "https://example.com",
-                "assets": [{"id": 10, "name": "halcyon-v1.0.0-windows-x64-update.zip"}]
-            })))
+            .and(path("/weyham/halcyon/releases/latest/download/latest.json"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let source = source(&server).await;
+        assert!(source.resolve_latest_release().await.unwrap().is_none());
+    }
+
+    /// 签名缺失是发布事故，必须报 InvalidManifest 而不是静默通过。
+    #[tokio::test]
+    async fn missing_signature_is_invalid_manifest() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/weyham/halcyon/releases/latest/download/latest.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(manifest_json()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/weyham/halcyon/releases/latest/download/latest.json.minisig",
+            ))
+            .respond_with(ResponseTemplate::new(404))
             .mount(&server)
             .await;
 
@@ -683,28 +612,13 @@ mod tests {
         assert!(matches!(error, UpdateError::InvalidManifest(_)));
     }
 
+    /// 制品下载：跟随到允许主机的重定向。
     #[tokio::test]
-    async fn release_not_found_maps_to_not_found() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/repos/weyham/halcyon/releases/latest"))
-            .respond_with(ResponseTemplate::new(404))
-            .mount(&server)
-            .await;
-
-        let source = source(&server).await;
-        let error = source.resolve_latest_release().await.unwrap_err();
-        let view = error.view();
-        assert_eq!(view.code, UpdateSourceErrorCode::NotFound);
-    }
-
-    /// 资产下载：跟随到允许主机的重定向，不带凭据。
-    #[tokio::test]
-    async fn artifact_download_follows_allowed_redirect_without_credentials() {
+    async fn artifact_download_follows_allowed_redirect() {
         let server = MockServer::start().await;
         let base = server.uri();
         Mock::given(method("GET"))
-            .and(path("/repos/weyham/halcyon/releases/assets/42"))
+            .and(path("/weyham/halcyon/releases/download/v1.0.1/update.zip"))
             .respond_with(
                 ResponseTemplate::new(302).insert_header("location", format!("{base}/cdn/blob")),
             )
@@ -719,8 +633,39 @@ mod tests {
             .await;
 
         let source = source(&server).await;
-        let bytes = source.fetch_artifact(42, 1024).await.unwrap();
+        let artifact = PlatformArtifact {
+            asset_id: None,
+            url: Some(format!(
+                "{base}/weyham/halcyon/releases/download/v1.0.1/update.zip"
+            )),
+            signature: String::new(),
+            sha256: String::new(),
+            size: 0,
+            helper: None,
+            manual_only: false,
+            allow_downgrade: false,
+        };
+        let bytes = source.fetch_artifact(&artifact, 1024).await.unwrap();
         assert_eq!(bytes, b"zip-bytes");
+    }
+
+    /// 制品没有 url 时 fail fast（清单由发布链保证必带 url）。
+    #[tokio::test]
+    async fn artifact_requires_url() {
+        let server = MockServer::start().await;
+        let source = source(&server).await;
+        let artifact = PlatformArtifact {
+            asset_id: Some(42),
+            url: None,
+            signature: String::new(),
+            sha256: String::new(),
+            size: 0,
+            helper: None,
+            manual_only: false,
+            allow_downgrade: false,
+        };
+        let error = source.fetch_artifact(&artifact, 1024).await.unwrap_err();
+        assert!(matches!(error, UpdateError::InvalidManifest(_)));
     }
 
     #[test]
@@ -729,6 +674,10 @@ mod tests {
         let url = Url::parse("https://evil.example.com/blob").unwrap();
         assert!(ensure_allowed_url(&url, &config).is_err());
         let url = Url::parse("https://objects.githubusercontent.com/blob").unwrap();
+        assert!(ensure_allowed_url(&url, &config).is_ok());
+        let url =
+            Url::parse("https://github.com/weyham/halcyon/releases/latest/download/latest.json")
+                .unwrap();
         assert!(ensure_allowed_url(&url, &config).is_ok());
     }
 }
