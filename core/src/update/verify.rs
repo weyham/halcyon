@@ -89,7 +89,6 @@ pub fn verify_size(data_len: usize, expected_size: u64) -> Result<(), UpdateErro
 pub fn default_install_allowlist(helper_path: Option<&str>) -> HashSet<String> {
     let mut allowed = HashSet::from([
         "halcyon.exe".to_string(),
-        "WebView2Loader.dll".to_string(),
         "VERSION.txt".to_string(),
         "LICENSE.txt".to_string(),
     ]);

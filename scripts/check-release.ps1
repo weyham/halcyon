@@ -64,8 +64,8 @@ function Check-WindowsZip([string]$Name, [string[]]$Expected) {
     } finally { $zip.Dispose() }
 }
 
-Check-WindowsZip $portableName @('halcyon.exe','WebView2Loader.dll','VERSION.txt','LICENSE.txt','README-portable.txt')
-Check-WindowsZip $updateName @('halcyon.exe','halcyon-updater.exe','WebView2Loader.dll','VERSION.txt')
+Check-WindowsZip $portableName @('halcyon.exe','VERSION.txt','LICENSE.txt','README-portable.txt')
+Check-WindowsZip $updateName @('halcyon.exe','halcyon-updater.exe','VERSION.txt')
 if ($hasMac) {
     $macListing = @(& tar -tzf (Join-Path $assets $macName))
     if ($LASTEXITCODE -ne 0) { throw 'macOS archive unreadable' }

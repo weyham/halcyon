@@ -30,7 +30,7 @@ cargo build --release --features custom-protocol -p halcyon-app -p halcyon-updat
 - `latest.json`：签名清单；
 - `latest.json.minisig`：清单签名；
 - 清单中声明的平台制品、SHA-256、大小和 Windows helper；
-- Windows portable 包包含 `halcyon.exe`、`WebView2Loader.dll`、配置之外的可替换程序文件和 `halcyon-updater.exe`；
+- Windows portable 包包含 `halcyon.exe`（WebView2 静态链接，无需随包 DLL）、配置之外的可替换程序文件和 `halcyon-updater.exe`；
 - 配置、日志和系统凭据不进入 Release 制品。
 
 没有公钥、签名清单或校验失败时，Halcyon fail closed，不下载、不安装、不降级。

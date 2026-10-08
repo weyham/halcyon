@@ -10,19 +10,14 @@ jobs:
   check:
     name: windows-latest checks
     # 公开仓一律走 GitHub 托管 runner（fork PR 不允许触达自托管机器）。
-    # Windows 用 windows-gnu 工具链，与发布构建一致（-Wl,--no-insert-timestamp 需要 GNU ld）。
+    # Windows 用 MSVC 工具链，与发布构建一致（WebView2 静态链接 + /Brepro 可复现）。
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7
         with:
           node-version: 22
-      - name: Install Rust (windows-gnu)
-        shell: pwsh
-        run: |
-          rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
-          rustup default stable-x86_64-pc-windows-gnu
-          cargo --version
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d  # stable
       - name: Install UI dependencies
         run: npm ci --prefix ui
       - name: Build UI

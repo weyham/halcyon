@@ -26,8 +26,6 @@ function New-TestCase([string]$Name) {
     Copy-Item -LiteralPath $helper -Destination (Join-Path $staging 'halcyon-updater.exe')
     Write-TestFile (Join-Path $appDir 'VERSION.txt') "1.0.0`n"
     Write-TestFile (Join-Path $staging 'VERSION.txt') "1.0.1`n"
-    Write-TestFile (Join-Path $appDir 'WebView2Loader.dll') 'old'
-    Write-TestFile (Join-Path $staging 'WebView2Loader.dll') 'new'
     Write-TestFile (Join-Path $appDir 'config.json') '{"preserve":true}'
     $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     $record = [ordered]@{

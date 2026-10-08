@@ -18,7 +18,8 @@ try {
         $target = Join-Path $root "target\release-package"
         $env:CARGO_TARGET_DIR = $target
         if ($SingleJob) { $env:CARGO_BUILD_JOBS = "1" }
-        $env:RUSTFLAGS = "-C link-arg=-Wl,--no-insert-timestamp"
+        # MSVC link.exe /Brepro：确定性输出（PE 时间戳由内容哈希派生），保证可复现构建
+        $env:RUSTFLAGS = "-C link-arg=/Brepro"
         npm --prefix ui run build
         if ($LASTEXITCODE -ne 0) { throw "UI build failed" }
         cargo build --release -p halcyon-app --features custom-protocol
@@ -26,14 +27,11 @@ try {
         $build = Join-Path $target "release"
     }
     $exe = Join-Path $build "halcyon.exe"
-    $dll = Get-ChildItem -LiteralPath $build -Recurse -Filter WebView2Loader.dll | Select-Object -First 1
     if (-not (Test-Path -LiteralPath $exe)) { throw "halcyon.exe not found" }
-    if (-not $dll) { throw "WebView2Loader.dll not found" }
     if (-not $OutputDirectory) { $OutputDirectory = Join-Path $root "dist\halcyon-v$version-windows-x64-portable" }
     if (Test-Path -LiteralPath $OutputDirectory) { throw "Output directory already exists: $OutputDirectory" }
     New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
     Copy-Item -LiteralPath $exe -Destination (Join-Path $OutputDirectory "halcyon.exe")
-    Copy-Item -LiteralPath $dll.FullName -Destination (Join-Path $OutputDirectory "WebView2Loader.dll")
     Copy-Item -LiteralPath (Join-Path $root "LICENSE") -Destination (Join-Path $OutputDirectory "LICENSE.txt")
     Write-Utf8File (Join-Path $OutputDirectory "VERSION.txt") "$version`r`n"
     Write-Utf8File (Join-Path $OutputDirectory "README-portable.txt") "Halcyon $version Windows x64 portable`r`n`r`nRun halcyon.exe. Runtime config is stored in the data directory (do NOT delete data).`r`n"

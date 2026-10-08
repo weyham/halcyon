@@ -453,7 +453,7 @@ dev `target\`）下完全 no-op，不影响正常运行。
 ### 打包（一次构建、多通道共用）
 
 统一构建目录 `target\release-package`，带
-`RUSTFLAGS=-C link-arg=-Wl,--no-insert-timestamp`（不写 PE 时间戳 → 可复现）。
+`RUSTFLAGS=-C link-arg=/Brepro`（MSVC 确定性输出 → 可复现）。
 
 `scripts/build-velopack.ps1`：
 
@@ -461,7 +461,7 @@ dev `target\`）下完全 no-op，不影响正常运行。
 2. 安装/更新 vpk CLI（`dotnet tool update -g vpk`）
 3. **一次构建**：`npm --prefix ui run build` +
    `cargo build --release -p halcyon-app --features custom-protocol`（`CARGO_TARGET_DIR=target\release-package`）
-4. stage（halcyon.exe + WebView2Loader.dll + LICENSE + VERSION + README）
+4. stage（halcyon.exe + LICENSE + VERSION + README）
 5. `vpk pack`（packId=Halcyon、mainExe=halcyon.exe、icon=icon.ico、shortcuts=StartMenuRoot；
    `--splashImage` + `--splashProgressColor #F4622F` 为硬要求，缺图直接报错）
 6. `build-portable.ps1 -FromBuild target\release-package\release`：**复用同一份产物**打

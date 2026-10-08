@@ -45,23 +45,18 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7
         with:
           node-version: 22
-      # 发布构建必须 windows-gnu：-Wl,--no-insert-timestamp 是 GNU ld 参数
+      # 发布构建用 MSVC：WebView2 静态链接（免随包 DLL）+ /Brepro 确定性输出
       #（两个通道的 halcyon.exe 逐字节相同依赖它）。
-      - name: Install Rust (windows-gnu)
-        shell: pwsh
-        run: |
-          rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
-          rustup default stable-x86_64-pc-windows-gnu
-          cargo --version
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d  # stable
       - name: Build packages
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           if ([string]::IsNullOrWhiteSpace($env:HALCYON_UPDATE_PUBLIC_KEY)) { throw 'Missing HALCYON_UPDATE_PUBLIC_KEY repository variable' }
-          # K1/H2：三个通道共用同一次构建（含 no-insert-timestamp，保证 nupkg 与
+          # K1/H2：三个通道共用同一次构建（含 /Brepro 确定性输出，保证 nupkg 与
           # update.zip 里的 halcyon.exe 逐字节相同）。
           $env:CARGO_TARGET_DIR = 'target/release-package'
-          $env:RUSTFLAGS = '-C link-arg=-Wl,--no-insert-timestamp'
+          $env:RUSTFLAGS = '-C link-arg=/Brepro'
           npm ci --prefix ui
           npm run build --prefix ui
           cargo test -p halcyon-core
@@ -69,8 +64,6 @@ jobs:
           $version = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
           if ($env:RELEASE_TAG -notmatch '^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$' -or $env:RELEASE_TAG -ne "v$version") { throw 'Tag and source version mismatch' }
           $build = 'target/release-package/release'
-          $dll = Get-ChildItem $build -Recurse -Filter WebView2Loader.dll | Select-Object -First 1
-          if (-not $dll) { throw 'WebView2Loader.dll not found' }
           $root = "$env:RUNNER_TEMP\halcyon-assets"
           $portable = "$root\halcyon-v$version-windows-x64-portable"
           $update = "$root\halcyon-v$version-windows-x64-update"
@@ -79,13 +72,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Signing tool build failed' }
           Copy-Item "$build/halcyon-sign.exe" "$root/halcyon-sign.exe"
           Copy-Item "$build/halcyon.exe" "$portable/halcyon.exe"
-          Copy-Item $dll.FullName "$portable/WebView2Loader.dll"
           Copy-Item LICENSE "$portable/LICENSE.txt"
           Set-Content "$portable/VERSION.txt" $version -Encoding ascii
           Set-Content "$portable/README-portable.txt" "Halcyon $version Windows x64 portable. Extract to a writable directory and run halcyon.exe. Keep config.json when updating." -Encoding utf8
           Copy-Item "$build/halcyon.exe" "$update/halcyon.exe"
           Copy-Item "$build/halcyon-updater.exe" "$update/halcyon-updater.exe"
-          Copy-Item $dll.FullName "$update/WebView2Loader.dll"
           Set-Content "$update/VERSION.txt" $version -Encoding ascii
           Compress-Archive "$portable/*" "$root/halcyon-v$version-windows-x64-portable.zip"
           Compress-Archive "$update/*" "$root/halcyon-v$version-windows-x64-update.zip"

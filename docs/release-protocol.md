@@ -48,7 +48,7 @@ macOS（4）
 - `latest.json` 里 update 的 `sha256` / `size` == 实际 update.zip，
   `helper.sha256` / `size` == update.zip 内的 `halcyon-updater.exe`；
 - **两个通道的 `halcyon.exe` 必须同哈希**（nupkg 内 `lib/app/halcyon.exe` == update.zip 内
-  `halcyon.exe`）——它们在 CI 里共用同一次构建（`CARGO_TARGET_DIR` + no-insert-timestamp）；
+  `halcyon.exe`）——它们在 CI 里共用同一次构建（`CARGO_TARGET_DIR` + `/Brepro`）；
 - macOS 的两个 `.minisig` 都要通过验签。
 
 `latest.json` 的 Windows 平台资产必须指向 update 包，而不是 portable 包。

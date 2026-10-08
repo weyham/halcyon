@@ -59,8 +59,10 @@ cargo fmt --all
 ```
 
 - MSRV **1.82**；Node 22；首次构建先 `npm ci --prefix ui`；
-- 测试全部在 `halcyon-core` 与各 crate 测试文件（app crate 的测试 harness
-  在本机 windows-gnu 下起不来，见 `scripts/check.ps1` 注释）。
+- Windows 构建一律 MSVC 工具链（WebView2 静态链接；发布构建加 `/Brepro`
+  保证可复现）。本机默认 GNU 工具链仍可开发，但 app crate 的测试 harness
+  在 GNU 下起不来，`scripts/check.ps1` 会按 host triple 自动跳过；
+  发布相关验证请用 `cargo +stable-x86_64-pc-windows-msvc`。
 
 ## 6. 部署与生产纪律
 
