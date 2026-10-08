@@ -83,6 +83,14 @@ fn start_echo_upstream() -> (SocketAddr, Receiver<Captured>) {
                     body,
                 });
                 let _ = stream.flush();
+                // macOS/BSD：close 时接收缓冲区若有未读数据会发 RST，丢弃在途响应。
+                // 优雅关闭：先 shutdown(Write) 发 FIN，再排空对端残余数据，最后才 drop。
+                let _ = stream.shutdown(std::net::Shutdown::Write);
+                let _ = reader
+                    .get_mut()
+                    .set_read_timeout(Some(Duration::from_millis(300)));
+                let mut sink = Vec::new();
+                let _ = reader.read_to_end(&mut sink);
             });
         }
     });
