@@ -2,7 +2,7 @@
 license = "MIT"
 publish = false
 name = "halcyon-core"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 rust-version = "1.82"
 description = "Halcyon 的纯逻辑核心：Responses 请求改写引擎、配置与转发服务（无 Tauri 依赖）"

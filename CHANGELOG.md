@@ -2,6 +2,26 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.0.1] - 2026-10-08
+
+### 变更
+
+- 更新链路零 API 化：更新检查与下载全部走 `releases/latest/download` CDN 路由，
+  不再触碰 api.github.com，根除匿名限额导致的「GitHub 请求被限流」；
+  清单平台条目新增 `url` 字段（`assetId` 保留给 1.0.0 客户端）。
+- Windows 构建切换 MSVC 工具链：WebView2 静态链接，便携包/安装包/更新包
+  不再携带 `WebView2Loader.dll`；可复现性由 `/Brepro` 保证。
+- 清单未包含本平台键（该平台本次未发布）时按「无更新」处理，不再报错。
+
+### 移除
+
+- `update.include_prerelease` 配置项：零 API 源只读 Latest Release，天然不含
+  预发布；旧配置中的该字段会被兼容忽略。
+
+### 内部
+
+- 测试与发布脚本的 `%TEMP%` 产物自清理（成功即删、失败保留现场）。
+
 ## [1.0.0] - 2026-10-07
 
 首个公开发布版本。核心能力：
