@@ -14,6 +14,10 @@ pub const DEFAULT_CONFIG_NAME: &str = "config.json";
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:8788";
 pub const DEFAULT_WEB_SEARCH_MODE: &str = "note";
 pub const DEFAULT_WEB_SEARCH_NOTE_MAX: usize = 20;
+/// 图片瘦身默认阈值（MB）：Kimi nginx 约 100 MB，留 20% 余量。
+pub const DEFAULT_IMAGE_SLIM_THRESHOLD_MB: u64 = 80;
+/// 图片瘦身默认保留最近 N 张。
+pub const DEFAULT_IMAGE_SLIM_KEEP_RECENT: usize = 5;
 pub const WEB_SEARCH_MODES: [&str; 3] = ["drop", "note", "normalize"];
 /// 余额/额度查询覆盖配置（可选）：不写则按上游地址自动识别供应商。
 /// `template`: deepseek / kimi / glm / custom / none（none 关闭该路由的查询）；
@@ -174,6 +178,10 @@ pub struct Config {
     pub routes: BTreeMap<String, RouteEntry>,
     pub default_route: Option<String>,
     pub orphan_header: bool,
+    /// 请求体超过该阈值（MB）时触发图片瘦身。0 = 禁用。
+    pub image_slim_threshold_mb: u64,
+    /// 图片瘦身时保留最近 N 张不替换。
+    pub image_slim_keep_recent: usize,
 }
 
 impl Default for Config {
@@ -185,6 +193,8 @@ impl Default for Config {
             routes: BTreeMap::new(),
             default_route: None,
             orphan_header: true,
+            image_slim_threshold_mb: DEFAULT_IMAGE_SLIM_THRESHOLD_MB,
+            image_slim_keep_recent: DEFAULT_IMAGE_SLIM_KEEP_RECENT,
         }
     }
 }
@@ -198,6 +208,17 @@ pub struct ResolvedConfig {
     pub routes: Vec<Route>,
     pub default_route: Option<String>,
     pub orphan_header: bool,
+    /// 请求体超过该阈值（MB）时触发图片瘦身。0 = 禁用。
+    pub image_slim_threshold_mb: u64,
+    /// 图片瘦身时保留最近 N 张不替换。
+    pub image_slim_keep_recent: usize,
+}
+
+impl ResolvedConfig {
+    /// 图片瘦身阈值（字节）。
+    pub fn image_slim_threshold_bytes(&self) -> usize {
+        (self.image_slim_threshold_mb as usize) * 1024 * 1024
+    }
 }
 
 impl ResolvedConfig {
@@ -337,6 +358,8 @@ impl TryFrom<Config> for ResolvedConfig {
             routes,
             default_route: data.default_route.filter(|s| !s.is_empty()),
             orphan_header: data.orphan_header,
+            image_slim_threshold_mb: data.image_slim_threshold_mb,
+            image_slim_keep_recent: data.image_slim_keep_recent,
         })
     }
 }

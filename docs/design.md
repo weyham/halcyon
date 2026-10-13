@@ -232,6 +232,24 @@ CCS 切换只改 `~/.codex/config.toml` 与 `~/.codex/cc-switch-model-catalog.js
   再生成相邻备份；追加后校验行数必须恰好 +1，异常时用备份回滚。重复修复时最后权威
   模型已合法，不再追加。扫描与修复读取均为流式，不把整个 rollout 载入内存。
 
+### 2.5a 超大图片条目瘦身（请求出口）
+
+`view_image` 工具把图片以 base64 data URL 写进 `function_call_output.output`
+（`[{"type":"input_image","image_url":"data:image/png;base64,..."}]`）。
+官方移除响应存储后 Codex 每次请求全量回放历史，图片积累导致请求体超过上游
+nginx 体积限制（Kimi 实测 `413 Payload Too Large`，阈值约 100 MB）。
+
+**处理规则**（只在上游兼容改写之后触发）：
+
+- 请求体超过阈值（`image_slim_threshold_mb`，默认 80 MB）时触发；
+- 收集所有含 `input_image` 的 `function_call_output` 条目，按位置（=时间顺序）排序；
+- 保留最近 `image_slim_keep_recent` 张（默认 5）不动；
+- 从最旧开始，把 `input_image` 替换为 `input_text` 占位文本（含原始大小与 call_id），
+  直到请求体低于阈值；
+- 占位文本保留「这里看过一张图」的语义与调用信息，不携带像素；
+- 用户主动贴入的 `message` 图片不受影响（只处理工具输出）。
+
+日志与 `/health` 计数：`img_slim` / `images_slimmed`。
 ### 2.6 模型修复自动化的触发设计
 
 触发源只看 `~/.codex/config.toml` 的 **mtime + size 指纹**，不监控

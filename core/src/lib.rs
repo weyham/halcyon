@@ -25,10 +25,7 @@ pub(crate) mod test_util {
 
     impl TempWorkDir {
         pub(crate) fn new(tag: &str) -> Self {
-            Self(std::env::temp_dir().join(format!(
-                "halcyon-{tag}-{}",
-                uuid::Uuid::new_v4()
-            )))
+            Self(std::env::temp_dir().join(format!("halcyon-{tag}-{}", uuid::Uuid::new_v4())))
         }
     }
 

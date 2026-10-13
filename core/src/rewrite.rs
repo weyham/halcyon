@@ -25,6 +25,8 @@ pub struct RewriteReport {
     pub web_search_normalized: u32,
     /// 多智能体 agent_message 归一为 assistant message 的条数。
     pub agent_messages_normalized: u32,
+    /// 超大图片条目被瘦身（base64 → 占位文本）的条数。
+    pub images_slimmed: u32,
     pub notes: Vec<String>,
 }
 
@@ -38,6 +40,7 @@ impl RewriteReport {
             || self.web_search_dropped > 0
             || self.web_search_normalized > 0
             || self.agent_messages_normalized > 0
+            || self.images_slimmed > 0
     }
 }
 
@@ -652,18 +655,116 @@ pub fn rewrite_input_items(
     (rewritten, report)
 }
 
+/// 判定「超大体量图片条目」：`function_call_output` 的 `output` 数组含
+/// `input_image`（base64 data URL）。`view_image` 工具的结果就是这种形态。
+fn is_image_output(item: &Value) -> bool {
+    if item.get("type").and_then(Value::as_str) != Some("function_call_output") {
+        return false;
+    }
+    item.get("output")
+        .and_then(Value::as_array)
+        .is_some_and(|parts| {
+            parts
+                .iter()
+                .any(|p| p.get("type").and_then(Value::as_str) == Some("input_image"))
+        })
+}
+
+/// 把 `function_call_output` 中的 `input_image` 替换为占位文本。
+fn slim_image_output(item: &Value) -> Value {
+    let mut item = item.clone();
+    let call_id = item
+        .get("call_id")
+        .and_then(Value::as_str)
+        .unwrap_or("?")
+        .to_string();
+    if let Some(parts) = item.get_mut("output").and_then(Value::as_array_mut) {
+        for part in parts.iter_mut() {
+            if part.get("type").and_then(Value::as_str) == Some("input_image") {
+                let url_len = part
+                    .get("image_url")
+                    .and_then(Value::as_str)
+                    .map_or(0, |s| s.len());
+                let mb = url_len as f64 / 1024.0 / 1024.0;
+                *part = json!({
+                    "type": "input_text",
+                    "text": format!(
+                        "[图片输出已省略：原始 base64 约 {mb:.1} MB，为通过上游体积限制已移除。调用：{call_id}]"
+                    ),
+                });
+            }
+        }
+    }
+    item
+}
+
+/// 请求体超限时，从最旧的图片条目开始替换为占位文本，保留最近 `keep_recent` 张。
+///
+/// 只处理 `function_call_output` 中的 `input_image`（`view_image` 工具结果）。
+/// 用户主动贴入的 `message` 图片不受影响。
+fn slim_oversized_images(
+    mut items: Vec<Value>,
+    report: &mut RewriteReport,
+    keep_recent: usize,
+    threshold_bytes: usize,
+) -> Vec<Value> {
+    let img_indices: Vec<usize> = items
+        .iter()
+        .enumerate()
+        .filter(|(_, i)| is_image_output(i))
+        .map(|(idx, _)| idx)
+        .collect();
+    if img_indices.len() <= keep_recent {
+        return items;
+    }
+    // 有足够多的图片才可能触发，先算总大小
+    let total_before: usize = items.iter().map(|i| i.to_string().len()).sum();
+    if total_before <= threshold_bytes {
+        return items;
+    }
+    let mut total = total_before;
+    let replaceable = img_indices.len() - keep_recent;
+    for &idx in img_indices.iter().take(replaceable) {
+        if total <= threshold_bytes {
+            break;
+        }
+        let old_size = items[idx].to_string().len();
+        let new_item = slim_image_output(&items[idx]);
+        let new_size = new_item.to_string().len();
+        items[idx] = new_item;
+        total = total - old_size + new_size;
+        report.images_slimmed += 1;
+    }
+    if report.images_slimmed > 0 {
+        report.notes.push(format!(
+            "图片瘦身：替换 {} 张旧图片（保留最近 {keep_recent} 张），请求体约 {} MB → {} MB",
+            report.images_slimmed,
+            total_before / 1024 / 1024,
+            total / 1024 / 1024
+        ));
+    }
+    items
+}
 /// 改写一次 Responses 请求体；`input` 不是条目数组时原样返回。
 pub fn rewrite_request_body(
     body: &Value,
     web_search: &str,
     web_search_note_max: usize,
     include_header: bool,
+    image_slim_threshold_bytes: usize,
+    image_slim_keep_recent: usize,
 ) -> (Value, RewriteReport) {
     let Some(items) = body.get("input").and_then(Value::as_array) else {
         return (body.clone(), RewriteReport::default());
     };
-    let (rewritten, report) =
+    let (rewritten, mut report) =
         rewrite_input_items(items, web_search, web_search_note_max, include_header);
+    let rewritten = slim_oversized_images(
+        rewritten,
+        &mut report,
+        image_slim_keep_recent,
+        image_slim_threshold_bytes,
+    );
     if !report.changed() {
         return (body.clone(), report);
     }
@@ -809,6 +910,8 @@ mod tests {
             "note",
             20,
             true,
+            usize::MAX,
+            0,
         );
 
         assert_eq!(report.tool_rounds_repaired, 1);
@@ -826,6 +929,8 @@ mod tests {
             "note",
             20,
             true,
+            usize::MAX,
+            0,
         );
 
         assert_eq!(report.orphan_outputs, 1);
@@ -839,8 +944,14 @@ mod tests {
     fn missing_tool_output_gets_synthetic_aborted_result() {
         let call = paired_call();
         let message = plain_message();
-        let (new_body, report) =
-            rewrite_request_body(&body(vec![call.clone(), message.clone()]), "note", 20, true);
+        let (new_body, report) = rewrite_request_body(
+            &body(vec![call.clone(), message.clone()]),
+            "note",
+            20,
+            true,
+            usize::MAX,
+            0,
+        );
 
         assert_eq!(report.tool_rounds_repaired, 1);
         assert_eq!(new_body["input"][0], call);
@@ -859,7 +970,8 @@ mod tests {
         let output_a = json!({"type": "function_call_output", "call_id": "call_a", "output": "a"});
         let output_b = json!({"type": "function_call_output", "call_id": "call_b", "output": "b"});
         let items = vec![call_a, call_b, output_a, output_b];
-        let (new_body, report) = rewrite_request_body(&body(items.clone()), "note", 20, true);
+        let (new_body, report) =
+            rewrite_request_body(&body(items.clone()), "note", 20, true, usize::MAX, 0);
 
         assert_eq!(report.tool_rounds_repaired, 0);
         assert_eq!(new_body["input"], json!(items));
@@ -890,6 +1002,8 @@ mod tests {
             "note",
             20,
             true,
+            usize::MAX,
+            0,
         );
         assert_eq!(report.empty_reasoning_dropped, 1);
         assert_eq!(new_body["input"], json!([keep]));
@@ -902,7 +1016,8 @@ mod tests {
             "id": "rs_1",
             "content": [{"type": "reasoning_text", "text": "thinking"}],
         });
-        let (new_body, report) = rewrite_request_body(&body(vec![rs.clone()]), "note", 20, true);
+        let (new_body, report) =
+            rewrite_request_body(&body(vec![rs.clone()]), "note", 20, true, usize::MAX, 0);
         assert_eq!(report.empty_reasoning_dropped, 0);
         assert!(!report.changed());
         assert_eq!(new_body["input"], json!([rs]));
@@ -915,7 +1030,8 @@ mod tests {
             "id": "rs_2",
             "summary": [{"type": "summary_text", "text": "summary"}],
         });
-        let (new_body, report) = rewrite_request_body(&body(vec![rs.clone()]), "note", 20, true);
+        let (new_body, report) =
+            rewrite_request_body(&body(vec![rs.clone()]), "note", 20, true, usize::MAX, 0);
         assert_eq!(report.empty_reasoning_dropped, 0);
         assert!(!report.changed());
         assert_eq!(new_body["input"], json!([rs]));
@@ -1021,6 +1137,8 @@ model_catalog_json = "models.json"
             "note",
             20,
             true,
+            usize::MAX,
+            0,
         );
         assert_eq!(report.empty_messages_dropped, 1);
         assert_eq!(new_body["input"], json!([keep]));
@@ -1034,8 +1152,14 @@ model_catalog_json = "models.json"
             "role": "user",
             "content": [{"type": "input_text", "text": ""}],
         });
-        let (new_body, report) =
-            rewrite_request_body(&body(vec![empty_user, keep.clone()]), "note", 20, true);
+        let (new_body, report) = rewrite_request_body(
+            &body(vec![empty_user, keep.clone()]),
+            "note",
+            20,
+            true,
+            usize::MAX,
+            0,
+        );
         assert_eq!(report.empty_messages_dropped, 1);
         assert_eq!(new_body["input"], json!([keep]));
     }
@@ -1050,7 +1174,8 @@ model_catalog_json = "models.json"
                 {"type": "output_text", "text": "hi"},
             ],
         });
-        let (new_body, report) = rewrite_request_body(&body(vec![mixed.clone()]), "note", 20, true);
+        let (new_body, report) =
+            rewrite_request_body(&body(vec![mixed.clone()]), "note", 20, true, usize::MAX, 0);
         assert_eq!(report.empty_messages_dropped, 0);
         assert!(!report.changed());
         assert_eq!(new_body["input"], json!([mixed]));
@@ -1066,8 +1191,14 @@ model_catalog_json = "models.json"
                 {"type": "input_image", "image_url": "data:x"},
             ],
         });
-        let (new_body, report) =
-            rewrite_request_body(&body(vec![with_image.clone()]), "note", 20, true);
+        let (new_body, report) = rewrite_request_body(
+            &body(vec![with_image.clone()]),
+            "note",
+            20,
+            true,
+            usize::MAX,
+            0,
+        );
         assert_eq!(report.empty_messages_dropped, 0);
         assert!(!report.changed());
         assert_eq!(new_body["input"], json!([with_image]));
@@ -1076,7 +1207,8 @@ model_catalog_json = "models.json"
     #[test]
     fn normal_items_untouched_and_order_kept() {
         let items = vec![plain_message(), paired_call(), paired_output(), orphan()];
-        let (new_body, report) = rewrite_request_body(&body(items.clone()), "note", 20, true);
+        let (new_body, report) =
+            rewrite_request_body(&body(items.clone()), "note", 20, true, usize::MAX, 0);
         assert_eq!(report.orphan_outputs, 1);
         assert_eq!(new_body["input"][0], items[0]);
         assert_eq!(new_body["input"][1], items[1]);
@@ -1108,6 +1240,8 @@ model_catalog_json = "models.json"
             "note",
             20,
             true,
+            usize::MAX,
+            0,
         );
         assert_eq!(report.web_search_noted, 1);
         let note = &new_body["input"][1];
@@ -1126,6 +1260,8 @@ model_catalog_json = "models.json"
             "drop",
             20,
             true,
+            usize::MAX,
+            0,
         );
         assert_eq!(report.web_search_dropped, 1);
         assert_eq!(new_body["input"], json!([plain_message()]));
@@ -1138,6 +1274,8 @@ model_catalog_json = "models.json"
             "normalize",
             20,
             true,
+            usize::MAX,
+            0,
         );
         assert_eq!(report.web_search_normalized, 1);
         let reasoning = &new_body["input"][1];
@@ -1158,7 +1296,7 @@ model_catalog_json = "models.json"
             s["id"] = json!(format!("ws_{i}"));
             items.push(s);
         }
-        let (new_body, report) = rewrite_request_body(&body(items), "note", 2, true);
+        let (new_body, report) = rewrite_request_body(&body(items), "note", 2, true, usize::MAX, 0);
         assert_eq!(report.web_search_dropped, 3);
         assert_eq!(report.web_search_noted, 0);
         assert!(!report.notes.is_empty());
@@ -1174,8 +1312,8 @@ model_catalog_json = "models.json"
             paired_output(),
             legacy_search(),
         ]);
-        let (once, _) = rewrite_request_body(&b, "note", 20, true);
-        let (twice, report2) = rewrite_request_body(&once, "note", 20, true);
+        let (once, _) = rewrite_request_body(&b, "note", 20, true, usize::MAX, 0);
+        let (twice, report2) = rewrite_request_body(&once, "note", 20, true, usize::MAX, 0);
         assert_eq!(twice, once);
         assert!(!report2.changed());
     }
@@ -1183,8 +1321,114 @@ model_catalog_json = "models.json"
     #[test]
     fn input_not_a_list_is_untouched() {
         let b = json!({"model": "m", "input": "hello"});
-        let (new_body, report) = rewrite_request_body(&b, "note", 20, true);
+        let (new_body, report) = rewrite_request_body(&b, "note", 20, true, usize::MAX, 0);
         assert_eq!(new_body, b);
         assert!(!report.changed());
+    }
+    fn img_output(call_id: &str, mb: f64) -> Value {
+        let base64_len = (mb * 1024.0 * 1024.0) as usize;
+        json!({
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": [{"type": "input_image", "image_url": format!("data:image/png;base64,{}", "x".repeat(base64_len))}],
+        })
+    }
+
+    #[test]
+    fn image_output_detection() {
+        assert!(is_image_output(&img_output("c1", 1.0)));
+        assert!(!is_image_output(&paired_output()));
+        assert!(!is_image_output(&orphan()));
+        assert!(!is_image_output(&plain_message()));
+        assert!(!is_image_output(
+            &json!({"type":"function_call_output","call_id":"c1","output":"text"})
+        ));
+    }
+
+    #[test]
+    fn slim_replaces_image_with_placeholder() {
+        let item = img_output("view_image_287_abc", 3.0);
+        let slimmed = slim_image_output(&item);
+        let output = slimmed["output"].as_array().unwrap();
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0]["type"], "input_text");
+        let text = output[0]["text"].as_str().unwrap();
+        assert!(text.contains("图片输出已省略"), "占位文本应说明已省略");
+        assert!(
+            text.contains("view_image_287_abc"),
+            "占位文本应包含 call_id"
+        );
+    }
+
+    #[test]
+    fn slim_preserves_recent_images() {
+        let items: Vec<Value> = (0..10)
+            .map(|i| img_output(&format!("img_{i}"), 1.0))
+            .collect();
+        let mut report = RewriteReport::default();
+        // 阈值设为 5 MB：10 张 x 1 MB = 10 MB > 5 MB，需要替换到 <= 5 MB
+        let result = slim_oversized_images(items, &mut report, 3, 5 * 1024 * 1024);
+        assert!(report.images_slimmed > 0, "超阈值应触发瘦身");
+        assert!(report.images_slimmed <= 7, "最多替换到只剩 3 张");
+        // 最后 3 张不动
+        for i in 7..10 {
+            assert_eq!(
+                result[i]["output"][0]["type"], "input_image",
+                "最近 3 张不应被替换"
+            );
+        }
+    }
+
+    #[test]
+    fn slim_noop_when_under_threshold() {
+        let items: Vec<Value> = (0..3)
+            .map(|i| img_output(&format!("img_{i}"), 0.5))
+            .collect();
+        let mut report = RewriteReport::default();
+        let result = slim_oversized_images(items.clone(), &mut report, 2, 80 * 1024 * 1024);
+        assert_eq!(report.images_slimmed, 0, "不超阈值不应瘦身");
+        assert_eq!(result.len(), items.len());
+    }
+
+    #[test]
+    fn slim_noop_when_few_images() {
+        let items: Vec<Value> = (0..3)
+            .map(|i| img_output(&format!("img_{i}"), 1.0))
+            .collect();
+        let mut report = RewriteReport::default();
+        let _ = slim_oversized_images(items, &mut report, 5, 1);
+        assert_eq!(report.images_slimmed, 0, "图片数不超过保留数时不瘦身");
+    }
+
+    #[test]
+    fn slim_ignores_non_image_outputs() {
+        let mut items: Vec<Value> = (0..8)
+            .map(|i| img_output(&format!("img_{i}"), 1.0))
+            .collect();
+        items.push(paired_output());
+        items.push(orphan());
+        let mut report = RewriteReport::default();
+        let result = slim_oversized_images(items, &mut report, 3, 4 * 1024 * 1024);
+        assert!(report.images_slimmed > 0);
+        // 非图片条目不受影响
+        let last_two = &result[result.len() - 2..];
+        assert_eq!(last_two[0]["type"], "function_call_output");
+        assert_eq!(last_two[1]["type"], "function_call_output");
+    }
+
+    #[test]
+    fn full_pipeline_slims_oversized_images() {
+        let mut items: Vec<Value> = vec![orphan()];
+        for i in 0..8 {
+            items.push(img_output(&format!("img_{i}"), 1.0));
+        }
+        let b = body(items);
+        let (new_body, report) = rewrite_request_body(&b, "note", 20, true, 3 * 1024 * 1024, 3);
+        assert!(report.orphan_outputs > 0, "孤儿规则仍应生效");
+        assert!(report.images_slimmed > 0, "超阈值应触发图片瘦身");
+        let out_items = new_body["input"].as_array().unwrap();
+        // 最后 3 张图片不应被替换
+        let img_count = out_items.iter().filter(|i| is_image_output(i)).count();
+        assert!(img_count >= 3, "至少保留最近 3 张图片");
     }
 }

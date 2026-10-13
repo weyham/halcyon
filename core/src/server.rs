@@ -76,6 +76,8 @@ struct StatsInner {
     web_search_noted: u64,
     web_search_dropped: u64,
     web_search_normalized: u64,
+    /// 超大图片条目被瘦身（base64 → 占位文本）的条数。
+    images_slimmed: u64,
     upstream_errors: u64,
     clients: HashMap<String, u64>,
     /// 最近一次转发请求的时间（epoch 毫秒）；0 = 还没有流量。供托盘活动闪烁用。
@@ -136,6 +138,7 @@ impl Stats {
         g.web_search_noted += report.web_search_noted as u64;
         g.web_search_dropped += report.web_search_dropped as u64;
         g.web_search_normalized += report.web_search_normalized as u64;
+        g.images_slimmed += report.images_slimmed as u64;
     }
 
     /// 转发响应字节时调用（pump 每块一次）：Agent 正在输出的信号。
@@ -167,6 +170,7 @@ impl Stats {
             "web_search_noted": g.web_search_noted,
             "web_search_dropped": g.web_search_dropped,
             "web_search_normalized": g.web_search_normalized,
+            "images_slimmed": g.images_slimmed,
             "upstream_errors": g.upstream_errors,
             "clients": g.clients,
             "last_request_ms": g.last_request_ms,
@@ -491,6 +495,8 @@ fn handle_request(stream: &mut TcpStream, req: &Request, ctx: &Ctx) -> io::Resul
                     &route.web_search,
                     route.web_search_note_max,
                     ctx.config.orphan_header,
+                    ctx.config.image_slim_threshold_bytes(),
+                    ctx.config.image_slim_keep_recent,
                 );
                 report = rep;
                 if report.changed() {
@@ -619,7 +625,7 @@ fn handle_request(stream: &mut TcpStream, req: &Request, ctx: &Ctx) -> io::Resul
 
     let elapsed = started.elapsed().as_secs_f64() * 1000.0;
     log::info!(
-        "{} {} route={} originator={} status={} {:.0}ms bytes={}->{} orphan={} tool={} empty_msg={} empty_rs={} note={} drop={} normalize={} agent_msg={}",
+        "{} {} route={} originator={} status={} {:.0}ms bytes={}->{} orphan={} tool={} empty_msg={} empty_rs={} note={} drop={} normalize={} agent_msg={} img_slim={}",
         req.method,
         path,
         route.name,
@@ -636,6 +642,7 @@ fn handle_request(stream: &mut TcpStream, req: &Request, ctx: &Ctx) -> io::Resul
         report.web_search_dropped,
         report.web_search_normalized,
         report.agent_messages_normalized,
+        report.images_slimmed,
     );
     if !report.notes.is_empty() {
         log::info!("route={} 备注：{}", route.name, report.notes.join("; "));
