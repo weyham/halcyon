@@ -2,6 +2,21 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.0.2] - 2026-10-14
+
+### 新增
+
+- **超大图片条目瘦身**：请求体超过阈值（默认 80 MB）时，`function_call_output` 中的
+  `input_image`（`view_image` 工具的 base64 结果）按时间从旧到新替换为占位文本，
+  保留最近 5 张。修复 Kimi nginx `413 Payload Too Large`（实测 105.8 MB 请求体）。
+  配置：`image_slim_threshold_mb` / `image_slim_keep_recent`。
+- 请求日志与 `/health` 新增 `img_slim` / `images_slimmed` 计数。
+
+### 修复
+
+- macOS CI 上 server_test 真 TCP 集成测试偶发 RST/EOF（端口回收 + TIME_WAIT 元组冲突）：
+  echo 上游优雅关闭 + 测试互斥串行化。
+
 ## [1.0.1] - 2026-10-08
 
 ### 变更
