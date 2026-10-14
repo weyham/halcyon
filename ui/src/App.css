@@ -139,6 +139,7 @@ button.danger { color: #e74c3c; }
 .listen-row { margin-bottom: 16px; }
 .listen-row label { max-width: 260px; }
 .routes-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.routes-actions { display: flex; gap: 8px; }
 .settings-actions { display: flex; align-items: center; justify-content: flex-end; gap: 12px; margin-top: 22px; padding-top: 16px; border-top: 1px solid #33343d; }
 .settings-actions .msg { margin-top: 0; margin-right: auto; }
 

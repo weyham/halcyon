@@ -181,6 +181,59 @@ function toConfig(rows: RouteRow[], base: ShimConfig): ShimConfig {
   return { ...base, routes };
 }
 
+// ---------- 路由导入导出 ----------
+
+/** 导出文件的形状：带版本号，方便未来演进。 */
+interface RoutesExport {
+  kind: "halcyon-routes";
+  version: 1;
+  exportedAt: string;
+  routes: Record<string, RouteEntry>;
+}
+
+function exportRoutes(rows: RouteRow[]) {
+  const config = toConfig(rows, emptyConfig);
+  const payload: RoutesExport = {
+    kind: "halcyon-routes",
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    routes: config.routes,
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  a.href = url;
+  a.download = `halcyon-routes-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+/** 解析导入文件：校验形状，返回路由表；不合法时抛出带原因的异常。 */
+function parseRoutesImport(text: string): Record<string, RouteEntry> {
+  let data: unknown;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new Error("文件不是合法 JSON");
+  }
+  const obj = data as { kind?: string; routes?: unknown };
+  if (obj.kind !== "halcyon-routes" || typeof obj.routes !== "object" || obj.routes === null) {
+    throw new Error('文件格式不对：需要 Halcyon 导出的路由文件（kind="halcyon-routes"）');
+  }
+  const routes = obj.routes as Record<string, RouteEntry>;
+  for (const [name, r] of Object.entries(routes)) {
+    if (!name.trim()) throw new Error("存在空名称的路由");
+    if (typeof r.upstream !== "string" || !/^https?:\/\//.test(r.upstream.trim())) {
+      throw new Error(`路由 ${name} 的上游地址必须以 http(s):// 开头`);
+    }
+    if (r.web_search && !["note", "drop", "normalize"].includes(r.web_search)) {
+      throw new Error(`路由 ${name} 的 web_search 值不合法：${r.web_search}`);
+    }
+  }
+  return routes;
+}
 // ---------- 主组件 ----------
 
 export default function App() {
@@ -650,6 +703,7 @@ export default function App() {
             addr={addr}
             saving={saving}
             message={message}
+            setMessage={setMessage}
             runtimeInfo={runtimeInfo}
             runtimeError={runtimeError}
             onSave={save}
@@ -1262,6 +1316,7 @@ function SettingsPage({
   addr,
   saving,
   message,
+  setMessage,
   runtimeInfo,
   runtimeError,
   onSave,
@@ -1270,6 +1325,7 @@ function SettingsPage({
   rows: RouteRow[];
   updateRow: (i: number, patch: Partial<RouteRow>) => void;
   setRows: (fn: (rs: RouteRow[]) => RouteRow[]) => void;
+  setMessage: (m: { kind: "ok" | "err"; text: string } | null) => void;
   base: ShimConfig;
   setBase: (fn: (b: ShimConfig) => ShimConfig) => void;
   addr: string | null | undefined;
@@ -1295,13 +1351,55 @@ function SettingsPage({
 
       <div className="routes-head">
         <h3>路由映射</h3>
-        <button
-          onClick={() =>
-            setRows((rs) => [...rs, { name: "", upstream: "", aliases: "", web_search: "note", balance: null }])
-          }
-        >
-          + 添加路由
-        </button>
+        <div className="routes-actions">
+          <button
+            title="把当前所有路由导出为 JSON 文件"
+            onClick={() => {
+              try {
+                exportRoutes(rows);
+              } catch (e) {
+                setMessage({ kind: "err", text: `导出失败：${e}` });
+              }
+            }}
+          >
+            导出
+          </button>
+          <button
+            title="从 JSON 文件导入路由：同名覆盖，新名追加"
+            onClick={() => {
+              const input = document.createElement("input");
+              input.type = "file";
+              input.accept = ".json,application/json";
+              input.onchange = async () => {
+                const file = input.files?.[0];
+                if (!file) return;
+                try {
+                  const incoming = parseRoutesImport(await file.text());
+                  const names = Object.keys(incoming);
+                  const replaced = names.filter((n) => rows.some((r) => r.name.trim() === n)).length;
+                  const merged = toRows({ ...toConfig(rows, base).routes, ...incoming });
+                  setRows(() => merged);
+                  setMessage({
+                    kind: "ok",
+                    text: `已导入 ${names.length} 条路由（覆盖 ${replaced} 条）。检查无误后点「保存并重启代理」生效。`,
+                  });
+                } catch (e) {
+                  setMessage({ kind: "err", text: `导入失败：${e}` });
+                }
+              };
+              input.click();
+            }}
+          >
+            导入
+          </button>
+          <button
+            onClick={() =>
+              setRows((rs) => [...rs, { name: "", upstream: "", aliases: "", web_search: "note", balance: null }])
+            }
+          >
+            + 添加路由
+          </button>
+        </div>
       </div>
 
       {rows.length === 0 && <p className="hint">还没有路由。添加一条，例如 kimi → https://api.kimi.com/coding/v1</p>}
