@@ -134,6 +134,9 @@ pub struct RepairKinds {
     /// 血缘断链回填（旧队列文件无此字段时按 false 兼容）。
     #[serde(default)]
     pub lineage: bool,
+    /// 超大图片条目离线瘦身（旧队列文件无此字段时按 false 兼容）。
+    #[serde(default)]
+    pub images: bool,
 }
 
 impl RepairKinds {
@@ -143,6 +146,7 @@ impl RepairKinds {
             entries: false,
             roots: false,
             lineage: false,
+            images: false,
         }
     }
 
@@ -152,11 +156,12 @@ impl RepairKinds {
             entries: true,
             roots: true,
             lineage: true,
+            images: true,
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        !self.model && !self.entries && !self.roots && !self.lineage
+        !self.model && !self.entries && !self.roots && !self.lineage && !self.images
     }
 }
 
@@ -372,6 +377,7 @@ impl AutoRepair {
                 entries: false,
                 roots: !task.stale_roots.is_empty(),
                 lineage: !task.lineage_breaks.is_empty(),
+                images: task.oversized_images > 0,
             };
             if kinds.is_empty() {
                 continue;
@@ -384,6 +390,7 @@ impl AutoRepair {
                 existing.kinds.entries |= kinds.entries;
                 existing.kinds.roots |= kinds.roots;
                 existing.kinds.lineage |= kinds.lineage;
+                existing.kinds.images |= kinds.images;
                 existing.status = QueueStatus::Pending;
             } else {
                 self.queue.items.push(QueueItem {
@@ -487,6 +494,42 @@ impl AutoRepair {
                     crate::repair::repair_lineage_breaks(&thread_id, &roots);
                 if !fixes.is_empty() {
                     details.push(format!("血缘断链：回填 {} 处", fixes.len()));
+                    details.extend(fixes);
+                }
+                errors.extend(lineage_errors);
+            }
+            if kinds.images && errors.is_empty() {
+                let roots = [
+                    codex_home.join("sessions"),
+                    codex_home.join("archived_sessions"),
+                ];
+                match crate::repair::slim_thread_images(&thread_id, &roots, 5) {
+                    Ok(report) if report.slimmed == 0 => {
+                        details.push("图片瘦身：扫描已无需瘦身".to_string());
+                    }
+                    Ok(report) => {
+                        let saved_mb = report.bytes_before.saturating_sub(report.bytes_after)
+                            as f64
+                            / 1024.0
+                            / 1024.0;
+                        details.push(format!(
+                            "图片瘦身：替换 {} 张（保留最近 5 张），回放体积缩小 {saved_mb:.1} MB",
+                            report.slimmed
+                        ));
+                        details.extend(
+                            report
+                                .backups
+                                .iter()
+                                .map(|b| format!("备份 {}", b.display())),
+                        );
+                    }
+                    Err(e) => errors.push(format!("图片瘦身失败: {e}")),
+                }
+                // 瘦身改变分片字节长度，血缘偏移必须重算——即使用户没勾选血缘类。
+                let (fixes, lineage_errors) =
+                    crate::repair::repair_lineage_breaks(&thread_id, &roots);
+                if !fixes.is_empty() {
+                    details.push(format!("血缘断链：回填 {} 处（图片瘦身联动）", fixes.len()));
                     details.extend(fixes);
                 }
                 errors.extend(lineage_errors);

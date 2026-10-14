@@ -570,3 +570,130 @@ fn offline_repair_normalizes_agent_message() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+fn img_output_line(call_id: &str, mb: f64) -> String {
+    let n = (mb * 1024.0 * 1024.0) as usize;
+    rollout_line(&format!(
+        r#"{{"type":"function_call_output","call_id":"{call_id}","output":[{{"type":"input_image","image_url":"data:image/png;base64,{}"}}]}}"#,
+        "x".repeat(n)
+    ))
+}
+
+fn write_image_rollout(dir: &Path, tid: &str) -> PathBuf {
+    // 8 张 1MB 图片（ordinal 2-9）+ 一条普通输出（ordinal 10）。
+    // 带 ordinal 是硬要求：血缘回填要按 ordinal 定位边界字节偏移。
+    let path = dir.join(format!("rollout-2026-09-20T00-00-00-{tid}.jsonl"));
+    let meta = format!(
+        r#"{{"timestamp":"2026-09-20T00:00:00Z","ordinal":1,"type":"session_meta","payload":{{"id":"{tid}"}}}}"#
+    );
+    let mut body = vec![meta];
+    for i in 0..8usize {
+        body.push(ordinal_line(
+            (i + 2) as u64,
+            &format!(
+                r#"{{"type":"function_call_output","call_id":"img_{i}","output":[{{"type":"input_image","image_url":"data:image/png;base64,{}"}}]}}"#,
+                "x".repeat(1024 * 1024)
+            ),
+        ));
+    }
+    body.push(ordinal_line(
+        10,
+        r#"{{"type":"function_call_output","call_id":"call_ok","output":"ok"}}"#,
+    ));
+    std::fs::write(&path, body.join("\n") + "\n").unwrap();
+    path
+}
+
+#[test]
+fn scan_counts_oversized_image_outputs() {
+    let dir = temp_dir("scan-img");
+    let path = write_image_rollout(&dir, "11110000-0000-7000-8000-000000000001");
+    let scan = scan_file(&path);
+    assert_eq!(scan.image_outputs, 8, "8 张 1MB 图片都应计入");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn slim_thread_images_replaces_all_but_recent_five() {
+    let dir = temp_dir("slim");
+    let tid = "22220000-0000-7000-8000-000000000001";
+    let path = write_image_rollout(&dir, tid);
+    let before = std::fs::metadata(&path).unwrap().len();
+
+    let report = slim_thread_images(tid, &[dir.clone()], 5).unwrap();
+    assert_eq!(report.slimmed, 3, "8 张保留 5 张，应替换 3 张");
+    assert_eq!(report.files, vec![path.clone()]);
+
+    let text = std::fs::read_to_string(&path).unwrap();
+    let mut kept = 0usize;
+    let mut slimmed = 0usize;
+    for line in text.lines() {
+        let Ok(obj) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(payload) = obj.get("payload") else {
+            continue;
+        };
+        if payload.get("type").and_then(|t| t.as_str()) != Some("function_call_output") {
+            continue;
+        }
+        let Some(parts) = payload.get("output").and_then(|o| o.as_array()) else {
+            continue;
+        };
+        for part in parts {
+            match part.get("type").and_then(|t| t.as_str()) {
+                Some("input_image") => kept += 1,
+                Some("input_text")
+                    if part
+                        .get("text")
+                        .and_then(|t| t.as_str())
+                        .map_or(false, |s| s.contains("图片输出已省略")) =>
+                {
+                    slimmed += 1
+                }
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(kept, 5, "应保留最近 5 张");
+    assert_eq!(slimmed, 3, "应替换 3 张");
+    let after = std::fs::metadata(&path).unwrap().len();
+    assert!(after < before, "瘦身必须缩小文件体积");
+    assert!(!report.backups.is_empty(), "必须有备份");
+
+    // 幂等：再跑一次应无事可做
+    let again = slim_thread_images(tid, &[dir.clone()], 5).unwrap();
+    assert_eq!(again.slimmed, 0, "瘦身应幂等");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn slim_thread_images_backfills_child_offsets() {
+    let dir = temp_dir("slim-lineage");
+    let parent_tid = "33330000-0000-7000-8000-000000000001";
+    let parent = write_image_rollout(&dir, parent_tid);
+    // 子分片引用父分片，end_byte_offset 指向父分片 EOF（瘦身前合法）
+    let child =
+        dir.join("rollout-2026-09-21T00-00-00-33330000-0000-7000-8000-000000000001_c1.jsonl");
+    let eof = std::fs::metadata(&parent).unwrap().len();
+    let child_meta = format!(
+        r#"{{"timestamp":"2026-09-21T00:00:00Z","type":"session_meta","payload":{{"id":"44440000-0000-7000-8000-000000000001","history_base":{{"thread_id":"{parent_tid}","end_ordinal_exclusive":9,"end_byte_offset":{eof}}}}}}}"#
+    );
+    std::fs::write(&child, format!("{child_meta}\n")).unwrap();
+
+    let report = slim_thread_images(parent_tid, &[dir.clone()], 5).unwrap();
+    assert!(report.slimmed > 0);
+    assert!(
+        !report.lineage_backfills.is_empty(),
+        "瘦身改变父分片长度后必须回填子分片偏移：{:?}",
+        report.lineage_backfills
+    );
+    // 子分片的新偏移必须落在父分片实际大小之内
+    let child_text = std::fs::read_to_string(&child).unwrap();
+    let obj: serde_json::Value = serde_json::from_str(&child_text).unwrap();
+    let new_off = obj["payload"]["history_base"]["end_byte_offset"]
+        .as_u64()
+        .unwrap();
+    let parent_size = std::fs::metadata(&parent).unwrap().len();
+    assert!(new_off <= parent_size, "回填后的偏移不得越过父分片 EOF");
+    std::fs::remove_dir_all(&dir).ok();
+}

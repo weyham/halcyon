@@ -172,6 +172,10 @@ pub struct ScanResult {
     pub tool_rounds: usize,
     /// 多智能体 agent_message（严格上游拒绝，归一为 assistant 消息）。
     pub agent_message: usize,
+    /// 超大图片输出条目（function_call_output 含 base64 input_image，且条目
+    /// 序列化体积 > 64 KB）。可离线瘦身（占位替换），不计入 total()——
+    /// total() 驱动「实时保护」chip，图片瘦身是独立的可离线修复类。
+    pub image_outputs: usize,
     /// 前几条样本（行号 + id/name 或 query），供结果展示。
     pub samples: Vec<String>,
 }
@@ -254,6 +258,20 @@ pub fn scan_file(path: &Path) -> ScanResult {
                 result
                     .samples
                     .push(format!("行 {}: 空 reasoning", number + 1));
+            }
+        }
+        if crate::rewrite::is_image_output(&payload) && line.len() > 64 * 1024 {
+            result.image_outputs += 1;
+            if result.samples.len() < 5 {
+                let cid = payload
+                    .get("call_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?");
+                result.samples.push(format!(
+                    "行 {}: 图片输出 call_id={cid}（{:.1} MB）",
+                    number + 1,
+                    line.len() as f64 / 1024.0 / 1024.0
+                ));
             }
         }
         payloads.push(payload);
@@ -418,6 +436,146 @@ pub fn repair_file(
     Ok((changed, dropped, backup))
 }
 
+/// 图片瘦身（离线）结果。
+#[derive(Debug, Default)]
+pub struct SlimImagesReport {
+    /// 被改写的分片。
+    pub files: Vec<PathBuf>,
+    /// 替换为占位文本的图片条数。
+    pub slimmed: usize,
+    pub bytes_before: u64,
+    pub bytes_after: u64,
+    pub backups: Vec<PathBuf>,
+    /// 血缘回填明细（瘦身改变分片字节长度后必须回填子分片偏移）。
+    pub lineage_backfills: Vec<String>,
+    pub lineage_errors: Vec<String>,
+}
+
+/// 离线图片瘦身：把线程 rollout 里的 `input_image`（`view_image` 的 base64
+/// 结果）按时间从旧到新替换为占位文本，保留最近 `keep_recent` 张。
+///
+/// 与请求出口的实时瘦身（rewrite::slim_oversized_images）互补：出口只救当下
+/// 这一次请求，rollout 本体不变，下一次请求要重做一遍；离线修复直接改写
+/// rollout（备份 + 血缘回填），一劳永逸。仅处理 Codex 未运行时（同其它
+/// 静态修复的窗口约束）。
+pub fn slim_thread_images(
+    thread_id: &str,
+    roots: &[PathBuf],
+    keep_recent: usize,
+) -> Result<SlimImagesReport, String> {
+    let mut report = SlimImagesReport::default();
+    let files = collect_thread_files(roots, thread_id);
+    if files.is_empty() {
+        return Err(format!("找不到 {thread_id} 对应的 rollout 文件"));
+    }
+
+    // 第一遍：按全局顺序（父→子、行序）收集图片条目，确定保留集。
+    // 保留集 = 全局最后 keep_recent 个（file_idx, line_idx）。
+    struct ImgEntry {
+        file: usize,
+        line: usize,
+    }
+    let mut entries: Vec<ImgEntry> = Vec::new();
+    let mut file_lines: Vec<Vec<String>> = Vec::with_capacity(files.len());
+    for path in &files {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("读取失败 {}: {e}", path.display()))?;
+        let lines: Vec<String> = text.split_inclusive('\n').map(str::to_string).collect();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(payload) = payload_of(line) else {
+                continue;
+            };
+            if crate::rewrite::is_image_output(&payload) {
+                entries.push(ImgEntry {
+                    file: file_lines.len(),
+                    line: i,
+                });
+            }
+        }
+        file_lines.push(lines);
+    }
+    let slimmable = entries.len().saturating_sub(keep_recent);
+    if slimmable == 0 {
+        return Ok(report);
+    }
+    let keep: std::collections::HashSet<(usize, usize)> = entries[slimmable..]
+        .iter()
+        .map(|e| (e.file, e.line))
+        .collect();
+
+    // 第二遍：逐分片改写（只有命中的分片才动盘），随后做血缘回填。
+    for (file_idx, path) in files.iter().enumerate() {
+        let lines = &file_lines[file_idx];
+        let mut out: Vec<String> = Vec::with_capacity(lines.len());
+        let mut changed = 0usize;
+        let before: u64 = lines.iter().map(|l| l.len() as u64).sum();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(payload) = payload_of(line) else {
+                out.push(line.clone());
+                continue;
+            };
+            let is_img =
+                crate::rewrite::is_image_output(&payload) && !keep.contains(&(file_idx, i));
+            if !is_img {
+                out.push(line.clone());
+                continue;
+            }
+            let mut record: Value =
+                serde_json::from_str(line.trim_end()).map_err(|e| e.to_string())?;
+            record["payload"] = crate::rewrite::slim_image_output(&payload);
+            out.push(serde_json::to_string(&record).map_err(|e| e.to_string())? + "\n");
+            changed += 1;
+        }
+        if changed == 0 {
+            continue;
+        }
+        let after: u64 = out.iter().map(|l| l.len() as u64).sum();
+        report.bytes_before += before;
+        report.bytes_after += after;
+        report.slimmed += changed;
+        report.files.push(path.clone());
+        let stamp = chrono_stamp();
+        let bak = path.with_file_name(format!(
+            "{}.bak-slim-{stamp}",
+            path.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::copy(path, &bak).map_err(|e| format!("备份失败 {}: {e}", bak.display()))?;
+        std::fs::write(path, out.concat())
+            .map_err(|e| format!("写入失败 {}: {e}", path.display()))?;
+        report.backups.push(bak);
+
+        // 血缘回填：本分片变短后，直接子分片的 end_byte_offset 必须重算。
+        if let Some(ref_id) = shard_ref_id(path) {
+            for child in files.iter().skip(file_idx + 1) {
+                let Some((base_ref, ord_excl, old_off)) = read_history_base(child) else {
+                    continue;
+                };
+                if base_ref != ref_id {
+                    continue;
+                }
+                match compute_base_offset(path, ord_excl) {
+                    Ok(new_off) => match backfill_history_base(child, new_off) {
+                        Ok((bak, _, _)) => report.lineage_backfills.push(format!(
+                            "血缘回填 {}: end_byte_offset {old_off} -> {new_off}（备份 {}）",
+                            child.display(),
+                            bak.display()
+                        )),
+                        Err(e) if e == "offsets-equal" => {}
+                        Err(e) => report
+                            .lineage_errors
+                            .push(format!("血缘回填失败 {}: {e}", child.display())),
+                    },
+                    Err(e) => report.lineage_errors.push(format!(
+                        "血缘回填失败 {}: 父分片 {} 中{e}",
+                        child.display(),
+                        path.display()
+                    )),
+                }
+            }
+        }
+    }
+    Ok(report)
+}
 /// 本地时间戳（yyyyMMdd-HHmmss），用于备份文件名。
 fn chrono_stamp() -> String {
     jiff::Zoned::now().strftime("%Y%m%d-%H%M%S").to_string()

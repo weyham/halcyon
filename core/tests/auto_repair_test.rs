@@ -307,6 +307,7 @@ fn enqueue_unified_never_queues_realtime_protected_entries() {
         model_mismatch: model,
         stale_roots: vec![],
         lineage_breaks: vec![],
+        oversized_images: 0,
     };
     let touched = ar.enqueue_unified(
         "k3",

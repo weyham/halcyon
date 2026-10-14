@@ -14,8 +14,9 @@ pub const DEFAULT_CONFIG_NAME: &str = "config.json";
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:8788";
 pub const DEFAULT_WEB_SEARCH_MODE: &str = "note";
 pub const DEFAULT_WEB_SEARCH_NOTE_MAX: usize = 20;
-/// 图片瘦身默认阈值（MB）：Kimi nginx 约 100 MB，留 20% 余量。
-pub const DEFAULT_IMAGE_SLIM_THRESHOLD_MB: u64 = 80;
+/// 图片瘦身默认阈值（MB）：实测 Kimi 约 100 MB、GLM 约 80 MB（十进制）触发
+/// nginx 413，取 50 MB 对两家都有充分余量。
+pub const DEFAULT_IMAGE_SLIM_THRESHOLD_MB: u64 = 50;
 /// 图片瘦身默认保留最近 N 张。
 pub const DEFAULT_IMAGE_SLIM_KEEP_RECENT: usize = 5;
 pub const WEB_SEARCH_MODES: [&str; 3] = ["drop", "note", "normalize"];

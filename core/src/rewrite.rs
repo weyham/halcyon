@@ -657,7 +657,7 @@ pub fn rewrite_input_items(
 
 /// 判定「超大体量图片条目」：`function_call_output` 的 `output` 数组含
 /// `input_image`（base64 data URL）。`view_image` 工具的结果就是这种形态。
-fn is_image_output(item: &Value) -> bool {
+pub fn is_image_output(item: &Value) -> bool {
     if item.get("type").and_then(Value::as_str) != Some("function_call_output") {
         return false;
     }
@@ -671,7 +671,7 @@ fn is_image_output(item: &Value) -> bool {
 }
 
 /// 把 `function_call_output` 中的 `input_image` 替换为占位文本。
-fn slim_image_output(item: &Value) -> Value {
+pub fn slim_image_output(item: &Value) -> Value {
     let mut item = item.clone();
     let call_id = item
         .get("call_id")

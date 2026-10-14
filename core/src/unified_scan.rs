@@ -37,6 +37,8 @@ pub struct UnifiedTask {
     pub stale_roots: Vec<StaleRoot>,
     /// 血缘断链明细（history_base 偏移越过父分片 EOF / 父分片缺失）。
     pub lineage_breaks: Vec<LineageBreak>,
+    /// 可离线瘦身的超大图片条目数（保留最近 5 张后）。
+    pub oversized_images: usize,
 }
 
 /// 一条血缘断链。
@@ -57,6 +59,7 @@ impl UnifiedTask {
             || self.model_mismatch.is_some()
             || !self.stale_roots.is_empty()
             || !self.lineage_breaks.is_empty()
+            || self.oversized_images > 0
     }
 }
 
@@ -68,6 +71,7 @@ struct Entry {
     model_mismatch: Option<String>,
     stale_roots: Vec<StaleRoot>,
     lineage_breaks: Vec<LineageBreak>,
+    oversized_images: usize,
 }
 
 /// cwd → 项目名（最后一段目录名）。
@@ -165,6 +169,7 @@ pub fn scan_all(codex_home: &Path, sessions_root: &Path, info: &ModelInfo) -> Ve
                 entry.project = project;
             }
             entry.bad_entries += scan.total();
+            entry.oversized_images += scan.image_outputs;
         }
     }
 
@@ -214,6 +219,7 @@ pub fn scan_all(codex_home: &Path, sessions_root: &Path, info: &ModelInfo) -> Ve
             model_mismatch: entry.model_mismatch,
             stale_roots: entry.stale_roots,
             lineage_breaks: entry.lineage_breaks,
+            oversized_images: entry.oversized_images.saturating_sub(5),
         })
         .filter(UnifiedTask::has_issues)
         .collect();

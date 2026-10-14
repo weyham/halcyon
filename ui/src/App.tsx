@@ -99,6 +99,7 @@ interface UnifiedTask {
   modelMismatch?: string;
   staleRoots: StaleRoot[];
   lineageBreaks: LineageBreak[];
+  oversizedImages: number;
 }
 
 interface UnifiedScanReport {
@@ -428,7 +429,7 @@ export default function App() {
           .filter(
             (t) =>
               !settled.has(t.threadId) &&
-              (Boolean(t.modelMismatch) || t.staleRoots.length > 0 || t.lineageBreaks.length > 0),
+              (Boolean(t.modelMismatch) || t.staleRoots.length > 0 || t.lineageBreaks.length > 0 || t.oversizedImages > 0),
           )
           .map((t) => t.threadId),
       );
@@ -1032,7 +1033,10 @@ function RepairPage({
   // 仅含坏条目的任务不可选：内容形态问题由代理出口实时改写覆盖
   // （2026-10-07 方针），离线修复只做元数据类（模型/目录/血缘）。
   const actionable = (t: UnifiedTask) =>
-    Boolean(t.modelMismatch) || t.staleRoots.length > 0 || t.lineageBreaks.length > 0;
+    Boolean(t.modelMismatch) ||
+    t.staleRoots.length > 0 ||
+    t.lineageBreaks.length > 0 ||
+    t.oversizedImages > 0;
   const selectable = (t: UnifiedTask) => {
     const s = statusOf(t.threadId);
     return actionable(t) && s !== "pending" && s !== "done";
@@ -1201,6 +1205,12 @@ function RepairPage({
                             <span className="chip">
                               <span className="chip-dot lineage" />
                               血缘断链 ×{t.lineageBreaks.length}
+                            </span>
+                          )}
+                          {t.oversizedImages > 0 && (
+                            <span className="chip">
+                              <span className="chip-dot lineage" />
+                              图片瘦身 ×{t.oversizedImages}
                             </span>
                           )}
                         </div>
