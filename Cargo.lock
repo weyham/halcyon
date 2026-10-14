@@ -1790,7 +1790,7 @@ dependencies = [
 
 [[package]]
 name = "halcyon-app"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "async-trait",
  "halcyon-core",
@@ -1812,7 +1812,7 @@ dependencies = [
 
 [[package]]
 name = "halcyon-core"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1845,7 +1845,7 @@ dependencies = [
 
 [[package]]
 name = "halcyon-sign"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "halcyon-core",
  "minisign",
@@ -1853,7 +1853,7 @@ dependencies = [
 
 [[package]]
 name = "halcyon-updater"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "fs2",
  "halcyon-core",
