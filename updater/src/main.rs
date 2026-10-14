@@ -193,7 +193,10 @@ fn wait_for_parent_exit(pid: u32) -> Result<(), String> {
 /// Codex 会把 Halcyon 连带杀掉（2026-10-14 实测）。Job 不允许 breakaway
 /// 时 CreateProcess 会失败，此时回退普通启动（维持旧行为）。
 #[cfg(windows)]
-fn spawn_new_process(launch: &Path, journal: &UpdateJournal) -> Result<std::process::Child, String> {
+fn spawn_new_process(
+    launch: &Path,
+    journal: &UpdateJournal,
+) -> Result<std::process::Child, String> {
     use std::os::windows::process::CommandExt;
     const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -219,7 +222,10 @@ fn spawn_new_process(launch: &Path, journal: &UpdateJournal) -> Result<std::proc
 }
 
 #[cfg(not(windows))]
-fn spawn_new_process(launch: &Path, journal: &UpdateJournal) -> Result<std::process::Child, String> {
+fn spawn_new_process(
+    launch: &Path,
+    journal: &UpdateJournal,
+) -> Result<std::process::Child, String> {
     Command::new(launch)
         .arg("--readiness-token")
         .arg(&journal.readiness_token)
