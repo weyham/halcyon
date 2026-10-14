@@ -187,14 +187,49 @@ fn wait_for_parent_exit(pid: u32) -> Result<(), String> {
     Ok(())
 }
 
-fn launch_new_version(args: &Args, journal: &UpdateJournal) -> Result<std::process::Child, String> {
-    let launch = PathBuf::from(&args.launch);
+/// 启动新版本进程；在 Windows 上优先带 `CREATE_BREAKAWAY_FROM_JOB`：
+/// 如果 halcyon 是从某个 kill-on-close Job（如 Codex Desktop 的 Job）里被
+/// 部署/更新的，重启后的新进程不能继续留在该 Job 里，否则用户退出
+/// Codex 会把 Halcyon 连带杀掉（2026-10-14 实测）。Job 不允许 breakaway
+/// 时 CreateProcess 会失败，此时回退普通启动（维持旧行为）。
+#[cfg(windows)]
+fn spawn_new_process(launch: &Path, journal: &UpdateJournal) -> Result<std::process::Child, String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    match Command::new(launch)
+        .arg("--readiness-token")
+        .arg(&journal.readiness_token)
+        .current_dir(Path::new(&journal.app_dir))
+        .creation_flags(CREATE_BREAKAWAY_FROM_JOB | CREATE_NO_WINDOW)
+        .spawn()
+    {
+        Ok(child) => Ok(child),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            eprintln!("Job 不允许 breakaway，回退普通启动: {error}");
+            Command::new(launch)
+                .arg("--readiness-token")
+                .arg(&journal.readiness_token)
+                .current_dir(Path::new(&journal.app_dir))
+                .spawn()
+                .map_err(|error| error.to_string())
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+#[cfg(not(windows))]
+fn spawn_new_process(launch: &Path, journal: &UpdateJournal) -> Result<std::process::Child, String> {
     Command::new(launch)
         .arg("--readiness-token")
         .arg(&journal.readiness_token)
         .current_dir(Path::new(&journal.app_dir))
         .spawn()
         .map_err(|error| error.to_string())
+}
+fn launch_new_version(args: &Args, journal: &UpdateJournal) -> Result<std::process::Child, String> {
+    let launch = PathBuf::from(&args.launch);
+    spawn_new_process(&launch, journal)
 }
 
 fn rollback_and_launch_old(
@@ -293,12 +328,8 @@ fn mark_manual_repair(
 }
 
 fn launch_old_version(args: &Args, journal: &UpdateJournal) -> Result<std::process::Child, String> {
-    Command::new(&args.launch)
-        .arg("--readiness-token")
-        .arg(&journal.readiness_token)
-        .current_dir(Path::new(&journal.app_dir))
-        .spawn()
-        .map_err(|error| error.to_string())
+    let launch = PathBuf::from(&args.launch);
+    spawn_new_process(&launch, journal)
 }
 
 fn readiness_timeout() -> Duration {
