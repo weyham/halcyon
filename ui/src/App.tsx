@@ -191,7 +191,7 @@ interface RoutesExport {
   routes: Record<string, RouteEntry>;
 }
 
-function exportRoutes(rows: RouteRow[]) {
+function exportRoutesPayload(rows: RouteRow[]): string {
   const config = toConfig(rows, emptyConfig);
   const payload: RoutesExport = {
     kind: "halcyon-routes",
@@ -199,15 +199,7 @@ function exportRoutes(rows: RouteRow[]) {
     exportedAt: new Date().toISOString(),
     routes: config.routes,
   };
-  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  const d = new Date();
-  const pad = (n: number) => String(n).padStart(2, "0");
-  a.href = url;
-  a.download = `halcyon-routes-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}.json`;
-  a.click();
-  URL.revokeObjectURL(url);
+  return JSON.stringify(payload, null, 2);
 }
 
 /** 解析导入文件：校验形状，返回路由表；不合法时抛出带原因的异常。 */
@@ -1354,9 +1346,14 @@ function SettingsPage({
         <div className="routes-actions">
           <button
             title="把当前所有路由导出为 JSON 文件"
-            onClick={() => {
+            onClick={async () => {
               try {
-                exportRoutes(rows);
+                const contents = exportRoutesPayload(rows);
+                const path = await invoke<string | null>("export_routes_file", { contents });
+                setMessage({
+                  kind: "ok",
+                  text: path ? `已导出到：${path}` : "已取消导出",
+                });
               } catch (e) {
                 setMessage({ kind: "err", text: `导出失败：${e}` });
               }

@@ -357,6 +357,7 @@ pub fn run() {
             commands::get_status,
             commands::get_app_info,
             commands::open_external_url,
+            commands::export_routes_file,
             commands::check_update,
             commands::update_download,
             commands::update_install,

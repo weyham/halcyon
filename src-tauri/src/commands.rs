@@ -11,6 +11,27 @@ use crate::{restart_server, ShimState};
 
 const HALCYON_REPOSITORY: &str = "weyham/halcyon";
 
+/// 路由导出：弹原生保存对话框，把 JSON 写到用户选择的位置。
+///
+/// 返回写入的路径；用户取消对话框时返回 null。
+/// 注意：不要改成前端 Blob 下载——WebView2 会静默拦截 `<a download>`，文件不会落盘。
+#[tauri::command]
+pub async fn export_routes_file(contents: String) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("导出 Halcyon 路由")
+            .set_file_name("halcyon-routes.json")
+            .add_filter("JSON", &["json"])
+            .save_file()
+        else {
+            return Ok(None);
+        };
+        std::fs::write(&path, contents).map_err(|e| format!("写入失败：{e}"))?;
+        Ok(Some(path.display().to_string()))
+    })
+    .await
+    .map_err(|e| format!("导出任务失败：{e}"))?
+}
 #[tauri::command]
 pub fn open_external_url(url: String) -> Result<(), String> {
     if !(url.starts_with("https://") || url.starts_with("http://")) {
