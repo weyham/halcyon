@@ -496,7 +496,13 @@ impl AutoRepair {
                     details.push(format!("血缘断链：回填 {} 处", fixes.len()));
                     details.extend(fixes);
                 }
-                errors.extend(lineage_errors);
+                let (fatal, warnings): (Vec<String>, Vec<String>) = lineage_errors
+                    .into_iter()
+                    .partition(|e| !e.contains("缺失"));
+                for w in &warnings {
+                    details.push(format!("血缘警告（忽略）：{w}"));
+                }
+                errors.extend(fatal);
                 // 回填改变分片字节长度，同步重置分页历史投影。
                 match crate::repair::reset_thread_projection(codex_home, &thread_id, &roots) {
                     Ok((summary, n)) => {
@@ -505,7 +511,7 @@ impl AutoRepair {
                     Err(e) => errors.push(format!("投影重置失败: {e}")),
                 }
             }
-            if kinds.images && errors.is_empty() {
+            if kinds.images {
                 let roots = [
                     codex_home.join("sessions"),
                     codex_home.join("archived_sessions"),
@@ -539,7 +545,13 @@ impl AutoRepair {
                     details.push(format!("血缘断链：回填 {} 处（图片瘦身联动）", fixes.len()));
                     details.extend(fixes);
                 }
-                errors.extend(lineage_errors);
+                let (fatal, warnings): (Vec<String>, Vec<String>) = lineage_errors
+                    .into_iter()
+                    .partition(|e| !e.contains("缺失"));
+                for w in &warnings {
+                    details.push(format!("血缘警告（忽略）：{w}"));
+                }
+                errors.extend(fatal);
                 // 瘦身同样让分页历史投影游标越过 EOF（最近的对话在 UI 消失），
                 // 重置投影让 Codex 从 rollout 重新投影。
                 match crate::repair::reset_thread_projection(codex_home, &thread_id, &roots) {
