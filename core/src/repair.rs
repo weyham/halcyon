@@ -576,6 +576,69 @@ pub fn slim_thread_images(
     }
     Ok(report)
 }
+/// 离线修复后的投影重置：rollout 被改写（瘦身/血缘回填等）会改变分片字节
+/// 长度，Codex 分页历史库的投影游标（next_rollout_byte_offset）可能随之
+/// 越过文件 EOF，投影停摆——表现为「最近的对话在 UI 里消失」。
+///
+/// 处理：清除该线程全部身份（主 tid + 各分片 ref id）的派生投影
+/// （items / turns / realtime / 游标）。Codex 下次访问该线程时自动从
+/// rollout 链重新投影，全部历史恢复显示。历史库文件先备份。
+pub fn reset_thread_projection(
+    codex_home: &Path,
+    thread_id: &str,
+    roots: &[PathBuf],
+) -> Result<(String, usize), String> {
+    let db_path = codex_home.join("thread_history_1.sqlite");
+    if !db_path.exists() {
+        return Ok(("无分页历史库，跳过".to_string(), 0));
+    }
+
+    // 身份集合：主 tid + 线程链上每个分片的 ref id（fork 身份）。
+    let mut identities: Vec<String> = vec![thread_id.to_string()];
+    for path in collect_thread_files(roots, thread_id) {
+        if let Some(ref_id) = shard_ref_id(&path) {
+            if !identities.contains(&ref_id) {
+                identities.push(ref_id);
+            }
+        }
+    }
+
+    let stamp = chrono_stamp();
+    let bak = db_path.with_file_name(format!("thread_history_1.sqlite.bak-projection-{stamp}"));
+    std::fs::copy(&db_path, &bak).map_err(|e| format!("备份失败 {}: {e}", bak.display()))?;
+
+    let conn = rusqlite::Connection::open(&db_path)
+        .map_err(|e| format!("打开投影库失败 {}: {e}", db_path.display()))?;
+    let placeholders = identities
+        .iter()
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut deleted = 0usize;
+    let mut detail = Vec::new();
+    for table in [
+        "thread_items",
+        "thread_turns",
+        "thread_realtime_items",
+        "thread_history_projection_state",
+    ] {
+        let sql = format!("DELETE FROM {table} WHERE thread_id IN ({placeholders})");
+        let n = conn
+            .execute(&sql, rusqlite::params_from_iter(identities.iter()))
+            .map_err(|e| format!("清理 {table} 失败: {e}"))?;
+        detail.push(format!("{table}={n}"));
+        deleted += n;
+    }
+    conn.close().ok();
+    let summary = format!(
+        "投影重置（身份 {} 个，{}），备份 {}",
+        identities.len(),
+        detail.join(", "),
+        bak.display()
+    );
+    Ok((summary, deleted))
+}
+
 /// 本地时间戳（yyyyMMdd-HHmmss），用于备份文件名。
 fn chrono_stamp() -> String {
     jiff::Zoned::now().strftime("%Y%m%d-%H%M%S").to_string()

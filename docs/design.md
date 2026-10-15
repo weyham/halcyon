@@ -258,6 +258,15 @@ nginx 体积限制（Kimi 实测 `413 Payload Too Large`，阈值约 100 MB）�
 血缘回填联动（瘦身改变分片字节长度，子分片 end_byte_offset 必须重算）。
 离线修复需要 Codex 未运行（与其它静态修复同窗口约束）。修复后实时瘦身的
 `img_slim` 计数应归零。
+
+**投影重置（瘦身/血缘回填的必联动作）**：rollout 改写改变分片字节长度后，
+Codex 分页历史库（`thread_history_1.sqlite`）的投影游标
+（`next_rollout_byte_offset`）会越过文件 EOF，投影停摆——表现为「最近的
+对话在 UI 消失」（实测：01a0aa83 / 01a0aeb4 两线程）。修复执行器在图片
+瘦身与血缘回填之后自动清除该线程全部身份（主 tid + 各分片 ref id）的投影
+（items / turns / realtime / 游标，历史库先备份），Codex 下次访问自动从
+rollout 链重新投影。`codex migrate-rollouts` 对此无能为力（扫描判定全部
+"already paginated"），必须显式重置。
 ### 2.6 模型修复自动化的触发设计
 
 触发源只看 `~/.codex/config.toml` 的 **mtime + size 指纹**，不监控

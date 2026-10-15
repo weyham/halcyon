@@ -497,6 +497,13 @@ impl AutoRepair {
                     details.extend(fixes);
                 }
                 errors.extend(lineage_errors);
+                // 回填改变分片字节长度，同步重置分页历史投影。
+                match crate::repair::reset_thread_projection(codex_home, &thread_id, &roots) {
+                    Ok((summary, n)) => {
+                        details.push(format!("投影重置：{summary}（清除 {n} 行）"));
+                    }
+                    Err(e) => errors.push(format!("投影重置失败: {e}")),
+                }
             }
             if kinds.images && errors.is_empty() {
                 let roots = [
@@ -533,6 +540,14 @@ impl AutoRepair {
                     details.extend(fixes);
                 }
                 errors.extend(lineage_errors);
+                // 瘦身同样让分页历史投影游标越过 EOF（最近的对话在 UI 消失），
+                // 重置投影让 Codex 从 rollout 重新投影。
+                match crate::repair::reset_thread_projection(codex_home, &thread_id, &roots) {
+                    Ok((summary, n)) => {
+                        details.push(format!("投影重置：{summary}（清除 {n} 行）"));
+                    }
+                    Err(e) => errors.push(format!("投影重置失败: {e}")),
+                }
             }
             if kinds.model && errors.is_empty() {
                 if self.queue.target_model.is_empty() {
