@@ -65,6 +65,21 @@ fn orphan_item() -> serde_json::Value {
     })
 }
 
+fn image_item(index: usize) -> serde_json::Value {
+    json!({
+        "timestamp": "2026-10-04T00:00:05Z",
+        "type": "response_item",
+        "payload": {
+            "type": "function_call_output",
+            "call_id": format!("view_image_{index}"),
+            "output": [{
+                "type": "input_image",
+                "image_url": format!("data:image/png;base64,{}", "x".repeat(70 * 1024))
+            }]
+        }
+    })
+}
+
 #[test]
 fn stale_roots_scan_classifies_remap_and_remove() {
     let dir = TempDir::new().unwrap();
@@ -155,7 +170,7 @@ fn stale_roots_repair_remaps_removes_and_preserves_valid() {
 }
 
 #[test]
-fn unified_scan_merges_three_issue_kinds() {
+fn unified_scan_includes_only_offline_issue_kinds() {
     let dir = TempDir::new().unwrap();
     let home = fake_home(&dir);
     // 线程 A：模型不匹配 + 坏条目
@@ -179,6 +194,31 @@ fn unified_scan_merges_three_issue_kinds() {
     );
     // 线程 B：只有目录失效
     write_rollout(&home, "b", &[session_meta("t-b", "glm-5.3")]);
+    // 线程 C：只有实时出口保护覆盖的内容形态问题，不应进入离线扫描。
+    write_rollout(&home, "c", &[session_meta("t-c", "glm-5.3"), orphan_item()]);
+    // 线程 D：只有图片瘦身问题，仍应进入离线扫描（实时与离线是两条独立路径）。
+    let mut image_lines = vec![session_meta("t-images", "glm-5.3")];
+    image_lines.extend((0..6).map(image_item));
+    write_rollout(&home, "images", &image_lines);
+    // Guardian review 是 Codex 自动审查线程，即使模型字段过期也不应列入普通修复。
+    let mut guardian = session_meta("t-guardian", "deepseek-flash");
+    guardian["payload"]["thread_source"] = json!("guardian_review");
+    write_rollout(
+        &home,
+        "guardian",
+        &[
+            guardian,
+            json!({
+                "timestamp": "2026-10-04T00:00:01Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "thread_settings_applied",
+                    "thread_id": "t-guardian",
+                    "thread_settings": { "model": "deepseek-flash" }
+                }
+            }),
+        ],
+    );
     write_global_state(
         &home,
         json!({
@@ -191,7 +231,6 @@ fn unified_scan_merges_three_issue_kinds() {
         .iter()
         .find(|t| t.thread_id == "t-a")
         .expect("t-a 应在结果中");
-    assert_eq!(a.bad_entries, 2);
     assert_eq!(a.model_mismatch.as_deref(), Some("deepseek-flash"));
     assert!(a.stale_roots.is_empty());
     let b = tasks
@@ -199,9 +238,15 @@ fn unified_scan_merges_three_issue_kinds() {
         .find(|t| t.thread_id == "t-b")
         .expect("t-b 应在结果中");
     assert_eq!(b.stale_roots.len(), 1);
-    assert_eq!(b.bad_entries, 0);
     assert!(b.model_mismatch.is_none());
-    assert_eq!(tasks.len(), 2, "无问题线程不应出现");
+    let images = tasks
+        .iter()
+        .find(|t| t.thread_id == "t-images")
+        .expect("纯图片瘦身任务也应在结果中");
+    assert_eq!(images.oversized_images, 1);
+    assert_eq!(tasks.len(), 3, "无问题线程不应出现");
+    assert!(!tasks.iter().any(|t| t.thread_id == "t-c"));
+    assert!(!tasks.iter().any(|t| t.thread_id == "t-guardian"));
 }
 
 /// ③ 血缘断链：子分片 history_base.end_byte_offset 越过父分片 EOF 或父分片缺失。
@@ -264,7 +309,7 @@ fn lineage_break_detected_and_repair_clears_it() {
 }
 
 #[test]
-fn lineage_break_parent_missing() {
+fn lineage_parent_missing_is_not_actionable() {
     let dir = TempDir::new().unwrap();
     let home = fake_home(&dir);
     let tid = "aaaa3333-0000-7000-8000-000000000000";
@@ -285,9 +330,11 @@ fn lineage_break_parent_missing() {
 
     let sessions = home.join("sessions");
     let tasks = scan_all(&home, &sessions, &info("m1"));
-    assert_eq!(tasks.len(), 1);
-    assert_eq!(tasks[0].lineage_breaks[0].reason, "parent-missing");
-    // 父分片缺失无法回填：报错可见
+    assert!(
+        tasks.is_empty(),
+        "父分片缺失没有可靠修复依据，不应挂为待修复"
+    );
+    // 直接调用底层修复仍然拒绝猜测偏移。
     let (fixed, errors) =
         halcyon_core::repair::repair_lineage_breaks(tid, std::slice::from_ref(&sessions));
     assert!(fixed.is_empty());

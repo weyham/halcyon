@@ -95,7 +95,6 @@ interface UnifiedTask {
   threadId: string;
   title?: string;
   project?: string;
-  badEntries: number;
   modelMismatch?: string;
   staleRoots: StaleRoot[];
   lineageBreaks: LineageBreak[];
@@ -423,7 +422,7 @@ export default function App() {
           .filter((i) => i.status === "pending" || i.status === "done")
           .map((i) => i.threadId),
       );
-      // 默认只勾选可操作项（模型/目录/血缘）；仅坏条目的任务由实时保护覆盖
+      // 扫描结果只包含可离线修复项，默认勾选尚未排队或完成的任务。
       setUnifiedSelected(
         res.tasks
           .filter(
@@ -1030,8 +1029,7 @@ function RepairPage({
   const queueItems = autoQueue?.queue?.items ?? [];
   const statusOf = (threadId: string): AutoQueueItem["status"] | null =>
     queueItems.find((i) => i.threadId === threadId)?.status ?? null;
-  // 仅含坏条目的任务不可选：内容形态问题由代理出口实时改写覆盖
-  // （2026-10-07 方针），离线修复只做元数据类（模型/目录/血缘）。
+  // 扫描结果只包含可离线修复的问题。
   const actionable = (t: UnifiedTask) =>
     Boolean(t.modelMismatch) ||
     t.staleRoots.length > 0 ||
@@ -1183,12 +1181,6 @@ function RepairPage({
                       <div className="grow">
                         <div className="repair-task-name">{t.title ?? shortThreadId(t.threadId)}</div>
                         <div className="repair-chips">
-                          {t.badEntries > 0 && (
-                            <span className="chip" title="对话内容形态问题，由代理出口实时改写覆盖，无需离线修复">
-                              <span className="chip-dot protected" />
-                              实时保护 ×{t.badEntries}
-                            </span>
-                          )}
                           {t.modelMismatch && (
                             <span className="chip">
                               <span className="chip-dot model" />
@@ -1218,9 +1210,7 @@ function RepairPage({
                       <div className="repair-status">
                         {queued && <span className="status-queue">已排队 · 退出后自动执行</span>}
                         {!queued && (
-                          <span className={actionable(t) ? "status-idle" : "status-protected"}>
-                            {actionable(t) ? "待修复" : "实时保护中"}
-                          </span>
+                          <span className="status-idle">待修复</span>
                         )}
                       </div>
                     </div>

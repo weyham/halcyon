@@ -15,8 +15,20 @@ use std::time::SystemTime;
 
 use serde_json::{json, Value};
 
-/// 自动审查（Guardian review）线程的 `thread_source` 标记：不进自动修复范围。
+/// 自动审查（Guardian review）线程的 `thread_source` 标记：不进入普通修复结果。
 pub const GUARDIAN_REVIEW_SOURCE: &str = "guardian_review";
+
+/// 判断 rollout 的 session_meta 是否属于 Codex 自动审查线程。
+///
+/// 状态库不是唯一信息源：新创建或尚未迁移的线程可能只把来源写在
+/// `session_meta` 中，因此同时识别 `thread_source` 与 `source.subagent.other`。
+pub fn is_guardian_review_payload(payload: &Value) -> bool {
+    payload.get("thread_source").and_then(Value::as_str) == Some(GUARDIAN_REVIEW_SOURCE)
+        || payload
+            .pointer("/source/subagent/other")
+            .and_then(Value::as_str)
+            == Some("guardian")
+}
 
 use crate::rewrite::ModelInfo;
 

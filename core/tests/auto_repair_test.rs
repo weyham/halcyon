@@ -293,17 +293,16 @@ fn repair_history_appends_and_loads_in_order() {
 }
 
 #[test]
-fn enqueue_unified_never_queues_realtime_protected_entries() {
-    // 2026-10-07 方针：仅含坏条目（实时保护类）的任务不得入队；
-    // 含元数据类问题的任务入队时 entries 也必须为 false。
+fn enqueue_unified_ignores_tasks_without_offline_issues() {
+    // 统一扫描只产出离线问题；没有离线问题的任务不得入队，入队项也不应
+    // 再带有历史遗留的 entries 修复类型。
     use halcyon_core::unified_scan::UnifiedTask;
     let dir = TempDir::new().unwrap();
     let mut ar = AutoRepair::load(dir.path());
-    let task = |tid: &str, bad: usize, model: Option<String>| UnifiedTask {
+    let task = |tid: &str, model: Option<String>| UnifiedTask {
         thread_id: tid.to_string(),
         title: None,
         project: None,
-        bad_entries: bad,
         model_mismatch: model,
         stale_roots: vec![],
         lineage_breaks: vec![],
@@ -312,11 +311,11 @@ fn enqueue_unified_never_queues_realtime_protected_entries() {
     let touched = ar.enqueue_unified(
         "k3",
         &[
-            task("t-entries-only", 5, None),
-            task("t-with-model", 3, Some("deepseek-flash".to_string())),
+            task("t-no-offline-issue", None),
+            task("t-with-model", Some("deepseek-flash".to_string())),
         ],
     );
-    assert_eq!(touched, 1, "仅坏条目的任务不得入队");
+    assert_eq!(touched, 1, "没有离线问题的任务不得入队");
     let item = &ar.queue.items[0];
     assert_eq!(item.thread_id, "t-with-model");
     assert!(!item.kinds.entries, "入队项的 entries 必须为 false");

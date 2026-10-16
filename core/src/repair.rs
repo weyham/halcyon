@@ -174,7 +174,7 @@ pub struct ScanResult {
     pub agent_message: usize,
     /// 超大图片输出条目（function_call_output 含 base64 input_image，且条目
     /// 序列化体积 > 64 KB）。可离线瘦身（占位替换），不计入 total()——
-    /// total() 驱动「实时保护」chip，图片瘦身是独立的可离线修复类。
+    /// total() 只统计内容形态问题，图片瘦身是独立的可离线修复类。
     pub image_outputs: usize,
     /// 前几条样本（行号 + id/name 或 query），供结果展示。
     pub samples: Vec<String>,

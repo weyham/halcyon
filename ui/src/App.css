@@ -221,8 +221,6 @@ button.danger { color: #e74c3c; }
 .chip-dot.model { background: #4f7fd0; }
 .chip-dot.cwd { background: #9061c9; }
 .chip-dot.lineage { background: #c084fc; }
-.chip-dot.protected { background: #2ecc71; }
-.status-protected { color: #2ecc71; font-size: 12px; white-space: nowrap; }
 .repair-status { font-size: 11px; white-space: nowrap; padding-top: 2px; }
 .status-ok { color: #2ecc71; }
 .status-queue { color: #d9b04a; }

@@ -1,20 +1,21 @@
-//! 修复页统一扫描：每个任务汇总三类可离线修复的问题。
+//! 修复页统一扫描：只汇总可离线修复的问题。
 //!
-//! - 坏条目（孤儿注入 / 旧形状搜索 / 空文本 / 空 reasoning / 工具回合）：
-//!   复用 rewrite 判定，遍历 rollout 计数；
-//! - 模型不匹配：复用 model_repair 的权威模型扫描；
-//! - 目录失效（B7）：roots_repair 扫描全局状态的 writable roots。
+//! 内容形态问题由请求出口实时保护，不在此处重复列出；这里保留模型、目录、
+//! 血缘和图片瘦身等需要处理本地状态或 rollout 的类别。Codex 自动审查线程
+//! （Guardian review）不是用户任务，也不进入普通修复结果。
 //!
 //! 单线程（深链 / id）扫描 = 全量扫描 + 过滤，保持单一代码路径不发散。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::model_repair::{load_display_index, scan_model_mismatches};
+use crate::model_repair::{
+    is_guardian_review_payload, load_display_index, scan_model_mismatches, GUARDIAN_REVIEW_SOURCE,
+};
 use crate::repair::{read_history_base, shard_ref_id};
 use crate::rewrite::ModelInfo;
 use crate::roots_repair::{scan_stale_roots, StaleRoot};
@@ -27,15 +28,12 @@ pub struct UnifiedTask {
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
-    /// 坏条目计数（五类确定性规则合计：孤儿注入 / 旧搜索 / 空文本 / 空 reasoning /
-    /// 工具回合）。
-    pub bad_entries: usize,
     /// 模型问题：权威模型缺失/非法时的当前值。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_mismatch: Option<String>,
     /// 目录失效明细。
     pub stale_roots: Vec<StaleRoot>,
-    /// 血缘断链明细（history_base 偏移越过父分片 EOF / 父分片缺失）。
+    /// 可回填的血缘断链明细（history_base 偏移越过父分片 EOF）。
     pub lineage_breaks: Vec<LineageBreak>,
     /// 可离线瘦身的超大图片条目数（保留最近 5 张后）。
     pub oversized_images: usize,
@@ -49,14 +47,13 @@ pub struct LineageBreak {
     pub shard: String,
     /// 引用的父分片 id。
     pub parent_ref: String,
-    /// "offset-past-parent" / "parent-missing"
+    /// 断链原因；父分片缺失只作底层诊断，不进入待修复列表。
     pub reason: String,
 }
 
 impl UnifiedTask {
     pub fn has_issues(&self) -> bool {
-        self.bad_entries > 0
-            || self.model_mismatch.is_some()
+        self.model_mismatch.is_some()
             || !self.stale_roots.is_empty()
             || !self.lineage_breaks.is_empty()
             || self.oversized_images > 0
@@ -67,7 +64,6 @@ impl UnifiedTask {
 struct Entry {
     title: Option<String>,
     project: Option<String>,
-    bad_entries: usize,
     model_mismatch: Option<String>,
     stale_roots: Vec<StaleRoot>,
     lineage_breaks: Vec<LineageBreak>,
@@ -93,7 +89,7 @@ pub fn project_name_from_cwd(cwd: &str) -> Option<String> {
 }
 
 /// 从 rollout 第一行 session_meta 提取 thread id 与项目名（cwd 目录名）。
-fn extract_thread_meta(path: &Path) -> Option<(String, Option<String>)> {
+fn extract_thread_meta(path: &Path) -> Option<(String, Option<String>, bool)> {
     let file = std::fs::File::open(path).ok()?;
     let line = BufReader::new(file).lines().next()?.ok()?;
     let record: Value = serde_json::from_str(&line).ok()?;
@@ -107,13 +103,14 @@ fn extract_thread_meta(path: &Path) -> Option<(String, Option<String>)> {
         .get("cwd")
         .and_then(Value::as_str)
         .and_then(project_name_from_cwd);
-    Some((thread_id, project))
+    Some((thread_id, project, is_guardian_review_payload(payload)))
 }
 
 /// 全量统一扫描。
 pub fn scan_all(codex_home: &Path, sessions_root: &Path, info: &ModelInfo) -> Vec<UnifiedTask> {
     let display = load_display_index(sessions_root);
     let mut map: HashMap<String, Entry> = HashMap::new();
+    let mut guardian_threads = HashSet::new();
 
     // 1) 模型不匹配（复用已验证的聚合扫描）
     for task in scan_model_mismatches(sessions_root, info) {
@@ -123,7 +120,7 @@ pub fn scan_all(codex_home: &Path, sessions_root: &Path, info: &ModelInfo) -> Ve
         entry.project = entry.project.take().or(task.project);
     }
 
-    // 2) 坏条目计数（遍历全部 rollout 分片），顺带收集血缘校验素材：
+    // 2) 遍历全部 rollout 分片，收集图片与血缘校验素材：
     //    ref_id → 文件大小（父分片索引）与每个分片的 history_base 链接。
     let mut shard_sizes: HashMap<String, u64> = HashMap::new();
     let mut links: Vec<(String, String, u64, String)> = Vec::new(); // (thread_id, parent_ref, offset, shard_name)
@@ -146,9 +143,12 @@ pub fn scan_all(codex_home: &Path, sessions_root: &Path, info: &ModelInfo) -> Ve
                 let size = p.metadata().map(|m| m.len()).unwrap_or(0);
                 shard_sizes.entry(ref_id).or_insert(size);
             }
-            let Some((thread_id, project)) = extract_thread_meta(&p) else {
+            let Some((thread_id, project, guardian)) = extract_thread_meta(&p) else {
                 continue;
             };
+            if guardian {
+                guardian_threads.insert(thread_id.clone());
+            }
             if let Some((base_ref, _ord, off)) = read_history_base(&p) {
                 links.push((
                     thread_id.clone(),
@@ -161,33 +161,23 @@ pub fn scan_all(codex_home: &Path, sessions_root: &Path, info: &ModelInfo) -> Ve
                 ));
             }
             let scan = crate::repair::scan_file(&p);
-            if scan.total() == 0 {
+            if scan.image_outputs == 0 {
                 continue;
             }
             let entry = map.entry(thread_id).or_default();
             if entry.project.is_none() {
                 entry.project = project;
             }
-            entry.bad_entries += scan.total();
             entry.oversized_images += scan.image_outputs;
         }
     }
 
-    // 2b) 血缘断链检测（③）：沿 history_base 链接校验「父分片存在且
-    // end_byte_offset 不越界」。遍历所有分片即覆盖整条链（每个分片各带
-    // 一条指向父的链接）。断链会让 Codex 启动校验拒绝加载整个线程。
+    // 2b) 血缘断链检测：沿 history_base 链接校验「父分片存在且
+    // end_byte_offset 不越界」。父分片已经缺失时没有可靠回填依据，不作为
+    // 可修复项展示；遍历所有分片即覆盖整条链。
     for (thread_id, parent_ref, offset, shard_name) in links {
         match shard_sizes.get(&parent_ref) {
-            None => {
-                map.entry(thread_id)
-                    .or_default()
-                    .lineage_breaks
-                    .push(LineageBreak {
-                        shard: shard_name,
-                        parent_ref,
-                        reason: "parent-missing".to_string(),
-                    });
-            }
+            None => {}
             Some(&parent_size) if offset > parent_size => {
                 map.entry(thread_id)
                     .or_default()
@@ -211,11 +201,15 @@ pub fn scan_all(codex_home: &Path, sessions_root: &Path, info: &ModelInfo) -> Ve
     // 合并 + 展示信息 + 过滤无问题任务
     let mut tasks: Vec<UnifiedTask> = map
         .into_iter()
+        .filter(|(thread_id, _)| {
+            !guardian_threads.contains(thread_id)
+                && display.sources.get(thread_id).map(String::as_str)
+                    != Some(GUARDIAN_REVIEW_SOURCE)
+        })
         .map(|(thread_id, entry)| UnifiedTask {
             title: display.titles.get(&thread_id).cloned().or(entry.title),
             project: display.projects.get(&thread_id).cloned().or(entry.project),
             thread_id,
-            bad_entries: entry.bad_entries,
             model_mismatch: entry.model_mismatch,
             stale_roots: entry.stale_roots,
             lineage_breaks: entry.lineage_breaks,
