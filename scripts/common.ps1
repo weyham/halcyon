@@ -4,6 +4,14 @@ function Write-Utf8File([string]$Path, [string]$Content) {
     [System.IO.File]::WriteAllText($Path, $Content, [System.Text.UTF8Encoding]::new($false))
 }
 
+# WebView2 静态链接只在 MSVC 目标下成立。开发者机器可能同时装有 GNU Rust，
+# 优先使用 rustup 代理并显式指定 MSVC 工具链，保证本地与发布构建一致。
+$halcyonRustupBin = Join-Path $env:USERPROFILE ".cargo\bin"
+if (Test-Path -LiteralPath (Join-Path $halcyonRustupBin "rustup.exe")) {
+    $env:Path = "$halcyonRustupBin;$env:Path"
+    $env:RUSTUP_TOOLCHAIN = "stable-x86_64-pc-windows-msvc"
+}
+
 function Get-HalcyonRoot { return (Resolve-Path (Join-Path $PSScriptRoot "..")).Path }
 
 function Read-HalcyonVersion {
