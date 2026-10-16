@@ -73,6 +73,7 @@ struct StatsInner {
     empty_messages_dropped: u64,
     agent_messages_normalized: u64,
     empty_reasoning_dropped: u64,
+    unverifiable_encrypted_content_stripped: u64,
     web_search_noted: u64,
     web_search_dropped: u64,
     web_search_normalized: u64,
@@ -135,6 +136,8 @@ impl Stats {
         g.empty_messages_dropped += report.empty_messages_dropped as u64;
         g.agent_messages_normalized += report.agent_messages_normalized as u64;
         g.empty_reasoning_dropped += report.empty_reasoning_dropped as u64;
+        g.unverifiable_encrypted_content_stripped +=
+            report.unverifiable_encrypted_content_stripped as u64;
         g.web_search_noted += report.web_search_noted as u64;
         g.web_search_dropped += report.web_search_dropped as u64;
         g.web_search_normalized += report.web_search_normalized as u64;
@@ -167,6 +170,7 @@ impl Stats {
             "empty_messages_dropped": g.empty_messages_dropped,
             "agent_messages_normalized": g.agent_messages_normalized,
             "empty_reasoning_dropped": g.empty_reasoning_dropped,
+            "unverifiable_encrypted_content_stripped": g.unverifiable_encrypted_content_stripped,
             "web_search_noted": g.web_search_noted,
             "web_search_dropped": g.web_search_dropped,
             "web_search_normalized": g.web_search_normalized,
@@ -625,7 +629,7 @@ fn handle_request(stream: &mut TcpStream, req: &Request, ctx: &Ctx) -> io::Resul
 
     let elapsed = started.elapsed().as_secs_f64() * 1000.0;
     log::info!(
-        "{} {} route={} originator={} status={} {:.0}ms bytes={}->{} orphan={} tool={} empty_msg={} empty_rs={} note={} drop={} normalize={} agent_msg={} img_slim={}",
+        "{} {} route={} originator={} status={} {:.0}ms bytes={}->{} orphan={} tool={} empty_msg={} empty_rs={} enc_strip={} note={} drop={} normalize={} agent_msg={} img_slim={}",
         req.method,
         path,
         route.name,
@@ -638,6 +642,7 @@ fn handle_request(stream: &mut TcpStream, req: &Request, ctx: &Ctx) -> io::Resul
         report.tool_rounds_repaired,
         report.empty_messages_dropped,
         report.empty_reasoning_dropped,
+        report.unverifiable_encrypted_content_stripped,
         report.web_search_noted,
         report.web_search_dropped,
         report.web_search_normalized,

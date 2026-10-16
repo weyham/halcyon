@@ -27,6 +27,8 @@ pub struct RewriteReport {
     pub agent_messages_normalized: u32,
     /// 超大图片条目被瘦身（base64 → 占位文本）的条数。
     pub images_slimmed: u32,
+    /// 跨 provider 回放时不可验证的加密 reasoning 参考被剥离的条数。
+    pub unverifiable_encrypted_content_stripped: u32,
     pub notes: Vec<String>,
 }
 
@@ -41,6 +43,7 @@ impl RewriteReport {
             || self.web_search_normalized > 0
             || self.agent_messages_normalized > 0
             || self.images_slimmed > 0
+            || self.unverifiable_encrypted_content_stripped > 0
     }
 }
 
@@ -346,6 +349,55 @@ pub fn is_empty_reasoning(item: &Value) -> bool {
     readable_text(content) + readable_text(summary) == 0
 }
 
+/// 判断 `encrypted_content` 是否是跨 provider 会话残留的本地参考值。
+///
+/// 真实 provider 加密内容是不透明长 blob；`UUID-0` 这种形态是部分
+/// provider 在 Responses 兼容响应里返回的 response-id 式引用。它只有
+/// 原 provider 能理解，切换模型/供应商后再回放会触发校验失败。
+fn is_unverifiable_encrypted_content(value: &str) -> bool {
+    let Some((candidate, ordinal)) = value.rsplit_once('-') else {
+        return false;
+    };
+    !ordinal.is_empty()
+        && ordinal.bytes().all(|b| b.is_ascii_digit())
+        && uuid::Uuid::parse_str(candidate).is_ok()
+}
+
+/// 删除跨 provider 不可验证的 `encrypted_content`。
+///
+/// 只处理带有可读明文（`content` / `summary`）的 reasoning；没有任何
+/// 可读内容的条目仍由 `is_empty_reasoning` 整条删除，不会留下空条目。
+pub fn strip_unverifiable_encrypted_content(item: &Value) -> Option<Value> {
+    if item.get("type").and_then(Value::as_str) != Some("reasoning") {
+        return None;
+    }
+    let encrypted = item.get("encrypted_content").and_then(Value::as_str)?;
+    if !is_unverifiable_encrypted_content(encrypted) {
+        return None;
+    }
+
+    let content = item
+        .get("content")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let summary = item
+        .get("summary")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let readable_item = json!({"type": "reasoning", "content": content, "summary": summary});
+    if !is_empty_reasoning(&readable_item) {
+        let mut stripped = item.clone();
+        stripped
+            .as_object_mut()
+            .expect("reasoning item must be an object")
+            .remove("encrypted_content");
+        return Some(stripped);
+    }
+    None
+}
+
 /// 从注入条目的信封里取出 `<source_thread_id>`。
 pub fn source_thread_id(item: &Value) -> Option<String> {
     let text = output_text(item.get("output").unwrap_or(&Value::Null));
@@ -619,6 +671,11 @@ pub fn rewrite_input_items(
         }
         if is_empty_reasoning(item) {
             report.empty_reasoning_dropped += 1;
+            continue;
+        }
+        if let Some(stripped) = strip_unverifiable_encrypted_content(item) {
+            report.unverifiable_encrypted_content_stripped += 1;
+            rewritten.push(stripped);
             continue;
         }
         if is_agent_message(item) {
@@ -1007,6 +1064,42 @@ mod tests {
         );
         assert_eq!(report.empty_reasoning_dropped, 1);
         assert_eq!(new_body["input"], json!([keep]));
+    }
+
+    #[test]
+    fn unverifiable_uuid_encrypted_content_is_stripped_when_plaintext_exists() {
+        let rs = json!({
+            "type": "reasoning",
+            "id": "rs_provider_ref",
+            "summary": [],
+            "content": [{"type": "reasoning_text", "text": "The user switched models."}],
+            "encrypted_content": "3c913153-0499-4906-9449-d105b18d35f7-0",
+        });
+        let (new_body, report) =
+            rewrite_request_body(&body(vec![rs.clone()]), "note", 20, true, usize::MAX, 0);
+
+        assert_eq!(report.unverifiable_encrypted_content_stripped, 1);
+        assert_eq!(new_body["input"][0]["id"], "rs_provider_ref");
+        assert_eq!(
+            new_body["input"][0]["content"][0]["text"],
+            "The user switched models."
+        );
+        assert!(new_body["input"][0].get("encrypted_content").is_none());
+    }
+
+    #[test]
+    fn opaque_provider_encrypted_content_is_preserved() {
+        let rs = json!({
+            "type": "reasoning",
+            "id": "rs_opaque",
+            "summary": [{"type": "summary_text", "text": "thinking"}],
+            "encrypted_content": "gAAAAABmQ0PlexampleOpaqueEncryptedBlobNotAUuidReference",
+        });
+        let (new_body, report) =
+            rewrite_request_body(&body(vec![rs.clone()]), "note", 20, true, usize::MAX, 0);
+
+        assert_eq!(report.unverifiable_encrypted_content_stripped, 0);
+        assert_eq!(new_body["input"], json!([rs]));
     }
 
     #[test]
