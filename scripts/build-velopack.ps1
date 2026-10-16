@@ -88,6 +88,7 @@ try {
         "--packVersion", $version,
         "--packDir", $stage,
         "--mainExe", "halcyon.exe",
+        "--runtime", "win-x64",
         "--outputDir", $OutputDirectory,
         "--icon", $icon,
         "--packTitle", "Halcyon",
