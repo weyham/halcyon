@@ -2,6 +2,33 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.0.5] - 2026-10-16
+
+### 修复
+
+- **跨 provider 加密 reasoning 回放失败**：部分 provider 在 reasoning 条目里返回
+  `UUID-序号` 形态的密文引用。切换模型后 Codex 回放历史时无法验证该引用并中断
+  turn。请求出口现在只删除这类不可移植引用，保留同条明文内容；正常不透明加密
+  内容不动。`/health` 与请求日志新增 `unverifiable_encrypted_content_stripped` /
+  `enc_strip` 计数。
+- **血缘父分片缺失**：没有可靠回填依据，不再作为待修复项反复报错；偏移越界类
+  断链仍正常回填。
+- **离线修复后分页历史消失**：图片瘦身或血缘回填改变分片长度后，自动重置受影响
+  线程的投影游标，让 Codex 从 rollout 重新投影。
+
+### 变更
+
+- **修复页统一扫描只列可离线修复项**：请求出口已实时保护的内容形态问题不再重复
+  展示；Codex 自动审查（Guardian review）线程不进入普通修复结果。
+- **图片瘦身支持离线修复**：保留最近 5 张，其余替换为占位文本，并联动血缘回填；
+  实时阈值默认降为 50 MB。
+- **本地构建与发布统一 MSVC 工具链**：项目级工具链固定 `x86_64-pc-windows-msvc`，
+  构建脚本优先使用 rustup 代理，避免本地 GNU 构建产出依赖 `WebView2Loader.dll`。
+
+### 内部
+
+- 自更新重启进程使用 `CREATE_BREAKAWAY_FROM_JOB`，避免随 Codex 退出被连带终止。
+
 ## [1.0.4] - 2026-10-14
 
 ### 修复
